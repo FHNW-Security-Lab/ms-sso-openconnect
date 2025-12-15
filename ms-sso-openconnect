@@ -1,0 +1,39 @@
+#!/bin/bash
+#
+# MS SSO OpenConnect - Wrapper script
+# Uses headless browser to handle Microsoft SSO authentication for OpenConnect VPN
+#
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="$SCRIPT_DIR/venv"
+PYTHON_SCRIPT="$SCRIPT_DIR/ms-sso-openconnect.py"
+
+# Get the real user (even when running with sudo)
+REAL_USER="${SUDO_USER:-$USER}"
+REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+
+# Use the real user's playwright cache
+export PLAYWRIGHT_BROWSERS_PATH="$REAL_HOME/.cache/ms-playwright"
+
+# Pass through DBUS for keyring access when running as root
+if [ -n "$SUDO_USER" ]; then
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u $REAL_USER)/bus"
+fi
+
+# Check if venv exists or needs updating
+if [ ! -d "$VENV_DIR" ]; then
+    echo "Creating Python virtual environment..."
+    python3 -m venv "$VENV_DIR"
+    source "$VENV_DIR/bin/activate"
+    pip install playwright keyring pyotp secretstorage -q
+    playwright install chromium
+    deactivate
+elif ! "$VENV_DIR/bin/python" -c "import keyring, pyotp" 2>/dev/null; then
+    echo "Installing additional dependencies..."
+    source "$VENV_DIR/bin/activate"
+    pip install keyring pyotp secretstorage -q
+    deactivate
+fi
+
+# Run the Python script with venv
+exec "$VENV_DIR/bin/python" "$PYTHON_SCRIPT" "$@"

@@ -1,0 +1,19 @@
+# Virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Debug screenshots
+/tmp/vpn-*.png
+
+# Local reports
+reports/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
