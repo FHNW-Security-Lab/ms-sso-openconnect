@@ -4,11 +4,15 @@ A command-line tool to connect to VPNs protected by Microsoft SSO authentication
 
 ## Features
 
+- **Named Connections**: Store multiple VPN configurations identified by custom names
+- **Multiple Credentials per Server**: Same server can have different credentials under different names
+- **Multi-Protocol Support**: Supports both Cisco AnyConnect and GlobalProtect protocols
 - **Headless Browser Authentication**: Uses Playwright to automate Microsoft SSO login
 - **Secure Credential Storage**: Stores credentials in GNOME Keyring
 - **Automatic TOTP Generation**: Generates 2FA codes from stored secret
-- **Session Cookie Caching**: Caches session cookies for fast reconnection
+- **Session Cookie Caching**: Caches session cookies per connection for fast reconnection
 - **Auto Re-authentication**: Automatically re-authenticates when cookies expire
+- **Dead Peer Detection**: Built-in keepalive settings to prevent connection timeouts
 
 ## Requirements
 
@@ -36,25 +40,50 @@ chmod +x ms-sso-openconnect
 
 ### Initial Setup
 
-Configure your VPN server and credentials (stored securely in GNOME Keyring):
+Add a VPN connection (credentials stored securely in GNOME Keyring):
 
 ```bash
 ./ms-sso-openconnect --setup
 ```
 
 You'll be prompted for:
-- VPN Server Domain (e.g., `vpn.example.com`)
-- Microsoft account email
-- Password
-- TOTP Secret (the base32 secret from your authenticator app setup)
+- **Connection Name** (e.g., `work`, `fhnw`, `client-vpn`)
+- **VPN Server Address** (e.g., `vpn.example.com`)
+- **Protocol** (Cisco AnyConnect or GlobalProtect)
+- **Microsoft account email**
+- **Password**
+- **TOTP Secret** (the base32 secret from your authenticator app setup)
 
 ### Connect to VPN
 
 ```bash
+# Connect to the only/default connection
 ./ms-sso-openconnect
+
+# Connect by name
+./ms-sso-openconnect work
+./ms-sso-openconnect fhnw
+
+# If multiple connections exist, you'll be prompted to select one
 ```
 
 On first connection, it authenticates via headless browser. Subsequent connections use cached session cookies for instant reconnection.
+
+### Manage Connections
+
+```bash
+# List all saved connections
+./ms-sso-openconnect --list
+
+# Edit an existing connection
+./ms-sso-openconnect --setup work
+
+# Delete a specific connection
+./ms-sso-openconnect --delete work
+
+# Delete all connections
+./ms-sso-openconnect --delete
+```
 
 ### Disconnect
 
@@ -78,8 +107,40 @@ On first connection, it authenticates via headless browser. Subsequent connectio
 # Enable debug output and screenshots
 ./ms-sso-openconnect --debug
 
-# Clear stored credentials
-./ms-sso-openconnect --clear
+# Disable DTLS (use TCP only) - helps with some firewalls
+./ms-sso-openconnect --no-dtls
+```
+
+## Examples
+
+```bash
+# Setup multiple connections to the same server with different accounts
+./ms-sso-openconnect --setup
+# Name: personal
+# Server: vpn.company.com
+# ...
+
+./ms-sso-openconnect --setup
+# Name: work
+# Server: vpn.company.com
+# ...
+
+# Connect with specific profile
+./ms-sso-openconnect personal
+./ms-sso-openconnect work
+
+# List all connections
+./ms-sso-openconnect --list
+# Output:
+#   personal
+#     Server:   vpn.company.com
+#     Protocol: Cisco AnyConnect
+#     Username: john.doe@personal.com
+#
+#   work
+#     Server:   vpn.company.com
+#     Protocol: Cisco AnyConnect
+#     Username: john.doe@company.com
 ```
 
 ## How It Works
@@ -93,13 +154,19 @@ On first connection, it authenticates via headless browser. Subsequent connectio
    - Extracts session cookies after successful auth
 
 2. **Cookie Caching**:
-   - Session cookies are cached in `~/.cache/ms-sso-openconnect/session.json`
+   - Session cookies are cached per connection name in `~/.cache/ms-sso-openconnect/`
    - Cookies expire after 12 hours or when rejected by server
    - Using `-d` to disconnect keeps the session alive on the server
 
 3. **Credential Storage**:
    - All credentials stored in GNOME Keyring (encrypted)
+   - Multiple connections supported (identified by name)
+   - Same server can have multiple credential sets
    - TOTP secret used to generate fresh codes when needed
+
+4. **Connection Stability**:
+   - Dead Peer Detection (DPD) keepalive set to 30 seconds
+   - Use `--no-dtls` if you experience connection drops through strict firewalls
 
 ## Troubleshooting
 
@@ -125,16 +192,29 @@ Use `--visible` to watch the browser and identify where it gets stuck:
 ### Cookie rejected
 If you see "Cookie was rejected by server", the session expired. The tool will automatically re-authenticate.
 
+### Dead Peer Detection errors
+If you see "CSTP Dead Peer Detection detected dead peer!", try:
+```bash
+# Use TCP only mode
+./ms-sso-openconnect --no-dtls
+```
+
+### Connection drops through firewall
+Some firewalls block DTLS (UDP). Use TCP-only mode:
+```bash
+./ms-sso-openconnect --no-dtls
+```
+
 ## Files
 
 - `ms-sso-openconnect` - Bash wrapper (sets up venv, handles sudo)
 - `ms-sso-openconnect.py` - Main Python script
-- `~/.cache/ms-sso-openconnect/session.json` - Cached session cookies
+- `~/.cache/ms-sso-openconnect/session_<name>.json` - Cached session cookies (per connection)
 
 ## Security Notes
 
 - Credentials are stored in GNOME Keyring (encrypted at rest)
-- Cookie cache file has 600 permissions (owner read/write only)
+- Cookie cache files have 600 permissions (owner read/write only)
 - TOTP secrets should be kept secure - treat them like passwords
 - The browser runs headless by default for security
 

@@ -2,19 +2,23 @@
 """
 MS SSO OpenConnect - Headless Browser Authentication
 
-Connects to any VPN using Microsoft SSO via a headless browser,
-then passes the authentication cookie to openconnect.
+Connects to VPNs using Microsoft SSO via a headless browser,
+supporting both Cisco AnyConnect and GlobalProtect protocols.
 
 Features:
-- Credentials and VPN domain stored securely in GNOME keyring
+- Multiple VPN connections (identified by name)
+- Multiple credentials per server (different names, same address)
+- Support for AnyConnect and GlobalProtect protocols
+- Credentials stored securely in GNOME keyring
 - TOTP codes generated automatically from stored secret
 - Session cookies cached for fast reconnection
 - Automatic re-authentication when cookies expire
-- Ctrl+C suspends without terminating session (fast reconnect)
 
 Usage:
-    ./ms-sso-openconnect --setup            (configure VPN and credentials)
-    ./ms-sso-openconnect                    (connect, uses cached cookie if valid)
+    ./ms-sso-openconnect --setup            (add/edit VPN connection)
+    ./ms-sso-openconnect                    (connect to default/only connection)
+    ./ms-sso-openconnect <name>             (connect by connection name)
+    ./ms-sso-openconnect --list             (list saved connections)
     ./ms-sso-openconnect --no-cache         (force re-authentication)
     ./ms-sso-openconnect --visible          (show browser for debugging)
     ./ms-sso-openconnect -d                 (disconnect, keep session alive)
@@ -28,14 +32,24 @@ import getpass
 import argparse
 import time
 import json
+import tempfile
+import shlex
 
 KEYRING_SERVICE = "ms-sso-openconnect"
+CONNECTIONS_KEY = "connections"
+
+# Supported protocols
+PROTOCOLS = {
+    "anyconnect": {"name": "Cisco AnyConnect", "flag": "anyconnect"},
+    "gp": {"name": "GlobalProtect", "flag": "gp"},
+}
 
 # Colors
 GREEN = "\033[32m"
 RED = "\033[31m"
 YELLOW = "\033[33m"
 CYAN = "\033[36m"
+BOLD = "\033[1m"
 NC = "\033[0m"
 
 
@@ -46,20 +60,58 @@ def print_header():
     print()
 
 
-def get_stored_config():
-    """Retrieve VPN domain and credentials from GNOME keyring."""
+def get_all_connections():
+    """Retrieve all stored VPN connections from keyring."""
     try:
         import keyring
-
-        vpn_domain = keyring.get_password(KEYRING_SERVICE, "vpn_domain")
-        username = keyring.get_password(KEYRING_SERVICE, "username")
-        password = keyring.get_password(KEYRING_SERVICE, "password")
-        totp_secret = keyring.get_password(KEYRING_SERVICE, "totp_secret")
-
-        return vpn_domain, username, password, totp_secret
+        data = keyring.get_password(KEYRING_SERVICE, CONNECTIONS_KEY)
+        if data:
+            return json.loads(data)
     except Exception as e:
         print(f"{YELLOW}Keyring error: {e}{NC}")
-        return None, None, None, None
+    return {}
+
+
+def save_all_connections(connections):
+    """Save all VPN connections to keyring."""
+    try:
+        import keyring
+        keyring.set_password(KEYRING_SERVICE, CONNECTIONS_KEY, json.dumps(connections))
+        return True
+    except Exception as e:
+        print(f"{RED}Failed to save connections: {e}{NC}")
+        return False
+
+
+def get_connection(name):
+    """Get a specific connection by name."""
+    connections = get_all_connections()
+    return connections.get(name)
+
+
+def save_connection(name, address, protocol, username, password, totp_secret):
+    """Save a single connection."""
+    connections = get_all_connections()
+    connections[name] = {
+        "address": address,
+        "protocol": protocol,
+        "username": username,
+        "password": password,
+        "totp_secret": totp_secret,
+    }
+    return save_all_connections(connections)
+
+
+def delete_connection(name):
+    """Delete a connection."""
+    connections = get_all_connections()
+    if name in connections:
+        del connections[name]
+        save_all_connections(connections)
+        # Also clear cookies for this connection
+        clear_stored_cookies(name)
+        return True
+    return False
 
 
 def generate_totp(totp_secret):
@@ -69,9 +121,8 @@ def generate_totp(totp_secret):
     return totp.now()
 
 
-def _get_cookie_file():
-    """Get path to cookie cache file in user's home directory."""
-    # Get real user's home even when running as root
+def _get_cache_dir():
+    """Get cache directory path."""
     real_user = os.environ.get('SUDO_USER', os.environ.get('USER', 'root'))
     if real_user != 'root':
         import pwd
@@ -84,18 +135,25 @@ def _get_cookie_file():
 
     cache_dir = os.path.join(home, ".cache", "ms-sso-openconnect")
     os.makedirs(cache_dir, mode=0o700, exist_ok=True)
-    return os.path.join(cache_dir, "session.json")
+    return cache_dir
 
 
-def store_cookies(cookies):
+def _get_cookie_file(name):
+    """Get path to cookie cache file for a specific connection."""
+    cache_dir = _get_cache_dir()
+    # Sanitize name for filename
+    safe_name = name.replace("/", "_").replace(":", "_").replace(" ", "_")
+    return os.path.join(cache_dir, f"session_{safe_name}.json")
+
+
+def store_cookies(name, cookies):
     """Store session cookies in a secure file."""
     try:
-        cookie_file = _get_cookie_file()
+        cookie_file = _get_cookie_file(name)
         data = {
             "cookies": cookies,
             "timestamp": int(time.time())
         }
-        # Write with restricted permissions
         with open(cookie_file, 'w') as f:
             json.dump(data, f)
         os.chmod(cookie_file, 0o600)
@@ -107,7 +165,6 @@ def store_cookies(cookies):
             try:
                 pw = pwd.getpwnam(real_user)
                 os.chown(cookie_file, pw.pw_uid, pw.pw_gid)
-                # Also fix cache directory ownership
                 cache_dir = os.path.dirname(cookie_file)
                 os.chown(cache_dir, pw.pw_uid, pw.pw_gid)
             except (KeyError, OSError):
@@ -120,20 +177,19 @@ def store_cookies(cookies):
         return False
 
 
-def get_stored_cookies(max_age_hours=12):
+def get_stored_cookies(name, max_age_hours=12):
     """Retrieve cached session cookies from file."""
     try:
-        cookie_file = _get_cookie_file()
+        cookie_file = _get_cookie_file(name)
         if not os.path.exists(cookie_file):
             return None
 
         with open(cookie_file, 'r') as f:
             data = json.load(f)
 
-        # Check if cookies are too old
         age_seconds = int(time.time()) - data.get("timestamp", 0)
         if age_seconds > max_age_hours * 3600:
-            clear_stored_cookies()
+            clear_stored_cookies(name)
             return None
 
         return data.get("cookies")
@@ -141,65 +197,110 @@ def get_stored_cookies(max_age_hours=12):
         return None
 
 
-def clear_stored_cookies():
-    """Clear cached cookies file."""
+def clear_stored_cookies(name=None):
+    """Clear cached cookies file(s)."""
     try:
-        cookie_file = _get_cookie_file()
-        if os.path.exists(cookie_file):
-            os.remove(cookie_file)
+        if name:
+            cookie_file = _get_cookie_file(name)
+            if os.path.exists(cookie_file):
+                os.remove(cookie_file)
+        else:
+            # Clear all cookies
+            cache_dir = _get_cache_dir()
+            for f in os.listdir(cache_dir):
+                if f.startswith("session_") and f.endswith(".json"):
+                    os.remove(os.path.join(cache_dir, f))
     except Exception:
         pass
 
 
-def store_config(vpn_domain, username, password, totp_secret):
-    """Store VPN config and credentials in GNOME keyring."""
-    try:
-        import keyring
+def list_connections():
+    """List all saved VPN connections."""
+    connections = get_all_connections()
+    if not connections:
+        print(f"{YELLOW}No saved connections. Use --setup to add one.{NC}")
+        return
 
-        keyring.set_password(KEYRING_SERVICE, "vpn_domain", vpn_domain)
-        keyring.set_password(KEYRING_SERVICE, "username", username)
-        keyring.set_password(KEYRING_SERVICE, "password", password)
-        keyring.set_password(KEYRING_SERVICE, "totp_secret", totp_secret)
-        print(f"{GREEN}Configuration stored in keyring.{NC}")
-        return True
-    except Exception as e:
-        print(f"{RED}Failed to store configuration: {e}{NC}")
-        return False
+    print(f"{CYAN}Saved VPN Connections:{NC}\n")
+    for name, config in connections.items():
+        address = config.get("address", "")
+        protocol = PROTOCOLS.get(config.get("protocol", "anyconnect"), {}).get("name", "Unknown")
+        username = config.get("username", "")
+        print(f"  {BOLD}{name}{NC}")
+        print(f"    Server:   {address}")
+        print(f"    Protocol: {protocol}")
+        print(f"    Username: {username}")
+        print()
 
 
-def setup_config():
-    """Interactive setup to store VPN config and credentials in keyring."""
+def setup_config(edit_name=None):
+    """Interactive setup to add or edit a VPN connection."""
     print(f"{CYAN}=== MS SSO OpenConnect Setup ==={NC}\n")
     print("Your configuration will be stored securely in GNOME keyring.\n")
 
-    # VPN Domain
-    print(f"{CYAN}VPN Server Configuration:{NC}")
-    vpn_domain = input("VPN Server Domain (e.g., vpn.example.com): ").strip()
-    if not vpn_domain:
-        print(f"{RED}Error: VPN domain cannot be empty{NC}")
+    connections = get_all_connections()
+
+    # Connection name
+    print(f"{CYAN}Connection Configuration:{NC}")
+    if edit_name:
+        name = edit_name
+        print(f"Editing: {name}")
+        existing = connections.get(name, {})
+    else:
+        name = input("Connection Name (e.g., work, fhnw, client-vpn): ").strip()
+        if not name:
+            print(f"{RED}Error: Connection name cannot be empty{NC}")
+            return False
+        existing = connections.get(name, {})
+        if existing:
+            print(f"{YELLOW}Connection '{name}' exists. Will update.{NC}")
+
+    # VPN Server address
+    default_addr = existing.get("address", "")
+    if default_addr:
+        address = input(f"VPN Server Address [{default_addr}]: ").strip() or default_addr
+    else:
+        address = input("VPN Server Address (e.g., vpn.example.com): ").strip()
+    if not address:
+        print(f"{RED}Error: Server address cannot be empty{NC}")
         return False
+
+    # Protocol selection
+    print(f"\n{CYAN}VPN Protocol:{NC}")
+    print("  1) Cisco AnyConnect")
+    print("  2) GlobalProtect")
+    default_proto = "1" if existing.get("protocol", "anyconnect") == "anyconnect" else "2"
+    proto_choice = input(f"Select protocol [{default_proto}]: ").strip() or default_proto
+    protocol = "anyconnect" if proto_choice == "1" else "gp"
 
     # Username
     print(f"\n{CYAN}Microsoft SSO Credentials:{NC}")
-    username = input("Username (email): ").strip()
+    default_user = existing.get("username", "")
+    if default_user:
+        username = input(f"Username (email) [{default_user}]: ").strip() or default_user
+    else:
+        username = input("Username (email): ").strip()
     if not username:
         print(f"{RED}Error: Username cannot be empty{NC}")
         return False
 
     # Password
-    password = getpass.getpass("Password: ")
-    if not password:
+    password = getpass.getpass("Password (leave empty to keep existing): ")
+    if not password and existing.get("password"):
+        password = existing["password"]
+    elif not password:
         print(f"{RED}Error: Password cannot be empty{NC}")
         return False
 
     # TOTP Secret
     print(f"\n{CYAN}TOTP Secret Setup:{NC}")
     print("Enter your Microsoft Authenticator TOTP secret key.")
-    print("This is the secret shown when you set up the authenticator app")
-    print("(often shown as a QR code, but also available as text).\n")
+    print("(Leave empty to keep existing)\n")
 
     totp_secret = input("TOTP Secret (base32, no spaces): ").strip().replace(" ", "").upper()
-    if not totp_secret:
+    if not totp_secret and existing.get("totp_secret"):
+        totp_secret = existing["totp_secret"]
+    elif not totp_secret:
         print(f"{RED}Error: TOTP secret cannot be empty{NC}")
         return False
 
@@ -213,88 +314,159 @@ def setup_config():
         print(f"{RED}Invalid TOTP secret: {e}{NC}")
         return False
 
-    # Store configuration
-    if store_config(vpn_domain, username, password, totp_secret):
-        print(f"\n{GREEN}Setup complete! Run './ms-sso-openconnect' to connect.{NC}")
+    # Save connection
+    if save_connection(name, address, protocol, username, password, totp_secret):
+        print(f"\n{GREEN}Connection '{name}' saved!{NC}")
+        print(f"Run './ms-sso-openconnect {name}' to connect.")
         return True
     return False
 
 
-def clear_config():
-    """Remove stored configuration from keyring."""
-    try:
-        import keyring
+def delete_config(name=None):
+    """Remove stored connection(s) from keyring."""
+    if name:
+        if delete_connection(name):
+            print(f"{GREEN}Connection '{name}' deleted.{NC}")
+        else:
+            print(f"{YELLOW}Connection '{name}' not found.{NC}")
+    else:
+        # Clear all
+        try:
+            import keyring
+            keyring.delete_password(KEYRING_SERVICE, CONNECTIONS_KEY)
+            clear_stored_cookies()
+            print(f"{GREEN}All connections deleted.{NC}")
+        except Exception as e:
+            print(f"{RED}Error deleting configuration: {e}{NC}")
 
-        for key in ["vpn_domain", "username", "password", "totp_secret"]:
-            try:
-                keyring.delete_password(KEYRING_SERVICE, key)
-            except keyring.errors.PasswordDeleteError:
-                pass
-        # Also clear cached cookies
-        clear_stored_cookies()
-        print(f"{GREEN}Configuration cleared from keyring.{NC}")
-    except Exception as e:
-        print(f"{RED}Error clearing configuration: {e}{NC}")
 
+def select_connection():
+    """Interactive connection selection if multiple exist."""
+    connections = get_all_connections()
 
-def get_config():
-    """Get VPN config from keyring or prompt user.
-
-    Returns: (vpn_domain, username, password, totp_secret_or_code, is_auto)
-    - is_auto=True means totp_secret_or_code is a secret to generate codes from
-    - is_auto=False means totp_secret_or_code is a manual OTP code
-    """
-    vpn_domain, username, password, totp_secret = get_stored_config()
-
-    if vpn_domain and username and password and totp_secret:
-        print(f"{GREEN}VPN Server: {vpn_domain}{NC}")
-        print(f"{GREEN}Using stored credentials for: {username}{NC}")
-        print(f"{GREEN}TOTP code will be generated automatically.{NC}\n")
-        return vpn_domain, username, password, totp_secret, True
-
-    # Fallback to manual entry
-    print(f"{YELLOW}No stored configuration found. Use --setup to save configuration.{NC}\n")
-    print(f"{CYAN}Enter VPN configuration:{NC}\n")
-
-    if not vpn_domain:
-        vpn_domain = input("VPN Server Domain: ").strip()
-        if not vpn_domain:
-            print(f"{RED}Error: VPN domain cannot be empty{NC}")
-            sys.exit(1)
-
-    if not username:
-        username = input("Username (email): ").strip()
-        if not username:
-            print(f"{RED}Error: Username cannot be empty{NC}")
-            sys.exit(1)
-
-    if not password:
-        password = getpass.getpass("Password: ")
-        if not password:
-            print(f"{RED}Error: Password cannot be empty{NC}")
-            sys.exit(1)
-
-    otp = input("2FA Code: ").strip()
-    if not otp:
-        print(f"{RED}Error: 2FA code cannot be empty{NC}")
+    if not connections:
+        print(f"{YELLOW}No saved connections. Use --setup to add one.{NC}")
         sys.exit(1)
 
-    return vpn_domain, username, password, otp, False
+    if len(connections) == 1:
+        return list(connections.keys())[0]
+
+    print(f"{CYAN}Select VPN connection:{NC}\n")
+    names = list(connections.keys())
+    for i, name in enumerate(names, 1):
+        address = connections[name].get("address", "")
+        protocol = PROTOCOLS.get(connections[name].get("protocol", "anyconnect"), {}).get("name", "Unknown")
+        print(f"  {i}) {name} ({address}, {protocol})")
+
+    print()
+    while True:
+        try:
+            choice = input("Enter number: ").strip()
+            idx = int(choice) - 1
+            if 0 <= idx < len(names):
+                return names[idx]
+        except ValueError:
+            pass
+        print(f"{RED}Invalid selection{NC}")
+
+
+def get_config(name):
+    """Get config for a specific connection.
+
+    Returns: (name, address, protocol, username, password, totp_secret)
+    """
+    conn = get_connection(name)
+    if conn:
+        return (
+            name,
+            conn.get("address"),
+            conn.get("protocol", "anyconnect"),
+            conn.get("username"),
+            conn.get("password"),
+            conn.get("totp_secret"),
+        )
+    return None, None, None, None, None, None
+
+
+def get_gp_prelogin_cookie(vpn_server, debug=False):
+    """
+    Get the prelogin-cookie from GlobalProtect's prelogin.esp endpoint.
+    This is needed for GP SAML authentication.
+    """
+    import urllib.request
+    import urllib.error
+    import ssl
+    import xml.etree.ElementTree as ET
+
+    # Use /global-protect/ path (some servers use /ssl-vpn/, but /global-protect/ is more common)
+    prelogin_url = f"https://{vpn_server}/global-protect/prelogin.esp?tmp=tmp&clientVer=4100&clientos=Linux"
+
+    try:
+        if debug:
+            print(f"    [DEBUG] Getting prelogin from {prelogin_url[:60]}...")
+
+        # Create SSL context
+        ctx = ssl.create_default_context()
+
+        req = urllib.request.Request(prelogin_url)
+        req.add_header('User-Agent', 'PAN GlobalProtect')
+
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as response:
+            if response.status == 200:
+                content = response.read().decode('utf-8')
+
+                if debug:
+                    print(f"    [DEBUG] prelogin.esp response ({len(content)} chars)")
+                    # Save for analysis
+                    with open('/tmp/vpn-prelogin.xml', 'w') as f:
+                        f.write(content)
+                    print(f"    [DEBUG] Saved to /tmp/vpn-prelogin.xml")
+
+                # Parse XML response
+                root = ET.fromstring(content)
+
+                # Look for prelogin-cookie, saml-request, and gateway info
+                prelogin_cookie = None
+                saml_request = None
+                gateway_ip = None
+
+                for elem in root.iter():
+                    if elem.tag == 'prelogin-cookie':
+                        prelogin_cookie = elem.text
+                    elif elem.tag == 'saml-request':
+                        saml_request = elem.text
+                    elif elem.tag == 'server-ip':
+                        gateway_ip = elem.text
+
+                if debug:
+                    if prelogin_cookie:
+                        print(f"    [DEBUG] Got prelogin-cookie: {prelogin_cookie[:20]}...")
+                    else:
+                        print(f"    [DEBUG] No prelogin-cookie in response")
+                    if saml_request:
+                        print(f"    [DEBUG] Got saml-request ({len(saml_request)} chars)")
+                    if gateway_ip:
+                        print(f"    [DEBUG] Gateway IP: {gateway_ip}")
+
+                return prelogin_cookie, saml_request, gateway_ip
+    except Exception as e:
+        if debug:
+            print(f"    [DEBUG] prelogin.esp error: {e}")
+
+    return None, None, None
 
 
 def do_saml_auth(vpn_server, username, password, totp_secret_or_code, auto_totp=False, headless=True, debug=False):
     """
     Complete Microsoft SAML authentication and return the session cookie.
-
-    Args:
-        vpn_server: VPN server domain
-        totp_secret_or_code: Either a TOTP secret (if auto_totp=True) or a manual code
-        auto_totp: If True, generate TOTP code from secret right when needed
     """
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
     import pwd
 
     vpn_url = f"https://{vpn_server}"
+
+    # For GlobalProtect, try to get prelogin-cookie first
+    gp_prelogin_cookie, gp_saml_request, gp_gateway_ip = get_gp_prelogin_cookie(vpn_server, debug)
 
     # Ensure Playwright uses the real user's browser cache (not root's)
     real_user = os.environ.get('SUDO_USER', os.environ.get('USER', 'root'))
@@ -308,13 +480,9 @@ def do_saml_auth(vpn_server, username, password, totp_secret_or_code, auto_totp=
     print(f"\n{GREEN}Authenticating via headless browser...{NC}\n")
 
     with sync_playwright() as p:
-        # Launch browser
         browser = p.chromium.launch(
             headless=headless,
-            args=[
-                '--no-sandbox',
-                '--disable-dev-shm-usage',
-            ]
+            args=['--no-sandbox', '--disable-dev-shm-usage']
         )
 
         context = browser.new_context(
@@ -322,216 +490,580 @@ def do_saml_auth(vpn_server, username, password, totp_secret_or_code, auto_totp=
         )
         page = context.new_page()
 
+        # For GlobalProtect: intercept SAML response and server response
+        saml_result = {'prelogin_cookie': None, 'saml_username': None, 'saml_response': None, 'portal_userauthcookie': None}
+
+        def handle_request(request):
+            # Look for SAML callback to VPN server
+            if vpn_server in request.url:
+                post_data = request.post_data
+                if post_data:
+                    # Parse form data for SAML response
+                    import urllib.parse
+                    try:
+                        params = urllib.parse.parse_qs(post_data)
+                        if debug:
+                            print(f"    [DEBUG] POST to VPN: {request.url[:60]}...")
+                            print(f"    [DEBUG] POST params: {list(params.keys())}")
+                        if 'SAMLResponse' in params:
+                            saml_result['saml_response'] = params['SAMLResponse'][0]
+                            if debug:
+                                print(f"    [DEBUG] Captured SAMLResponse ({len(saml_result['saml_response'])} chars)")
+                        if 'prelogin-cookie' in params:
+                            saml_result['prelogin_cookie'] = params['prelogin-cookie'][0]
+                            if debug:
+                                print(f"    [DEBUG] Captured prelogin-cookie from request")
+                    except Exception as e:
+                        if debug:
+                            print(f"    [DEBUG] Request parse error: {e}")
+
+        def handle_response(response):
+            # Look for prelogin-cookie in response from VPN server
+            if vpn_server in response.url:
+                try:
+                    # Check response headers for prelogin-cookie
+                    headers = response.headers
+                    if debug and 'SAML' in response.url.upper():
+                        print(f"    [DEBUG] Response from VPN: {response.url[:60]}...")
+
+                    # Check for DIRECT custom headers (how gp-saml-gui captures them)
+                    # Palo Alto sends these as custom HTTP response headers
+                    if 'prelogin-cookie' in headers:
+                        saml_result['prelogin_cookie'] = headers['prelogin-cookie']
+                        if debug:
+                            print(f"    [DEBUG] Got prelogin-cookie from direct header")
+                    if 'saml-username' in headers:
+                        saml_result['saml_username'] = headers['saml-username']
+                        if debug:
+                            print(f"    [DEBUG] Got saml-username from header: {headers['saml-username']}")
+                    if 'saml-auth-status' in headers:
+                        if debug:
+                            print(f"    [DEBUG] Got saml-auth-status: {headers['saml-auth-status']}")
+
+                    # Also check Set-Cookie headers as fallback
+                    set_cookie = headers.get('set-cookie', '')
+                    if 'prelogin-cookie' in set_cookie.lower() and not saml_result.get('prelogin_cookie'):
+                        import re
+                        match = re.search(r'prelogin-cookie=([^;]+)', set_cookie, re.IGNORECASE)
+                        if match:
+                            saml_result['prelogin_cookie'] = match.group(1)
+                            if debug:
+                                print(f"    [DEBUG] Got prelogin-cookie from Set-Cookie header")
+
+                    # Try to parse response body for XML with prelogin-cookie or portal-userauthcookie
+                    if 'SAML' in response.url.upper() or 'ACS' in response.url.upper():
+                        try:
+                            body = response.body()
+                            if body:
+                                body_text = body.decode('utf-8', errors='ignore')
+                                if debug:
+                                    print(f"    [DEBUG] Response body ({len(body_text)} chars)")
+                                    # Save for analysis
+                                    with open('/tmp/vpn-saml-response.txt', 'w') as f:
+                                        f.write(body_text)
+                                    print(f"    [DEBUG] Saved to /tmp/vpn-saml-response.txt")
+
+                                # Look for prelogin-cookie or portal-userauthcookie in body
+                                import re
+                                # Check for prelogin-cookie (only if not already set from header)
+                                if not saml_result.get('prelogin_cookie'):
+                                    match = re.search(r'<prelogin-cookie>([^<]+)</prelogin-cookie>', body_text)
+                                    if match:
+                                        saml_result['prelogin_cookie'] = match.group(1)
+                                        if debug:
+                                            print(f"    [DEBUG] Got prelogin-cookie from response body")
+
+                                # Check for portal-userauthcookie
+                                match = re.search(r'portal-userauthcookie["\s:=>]+([^"<\s]+)', body_text, re.IGNORECASE)
+                                if match and not saml_result.get('portal_userauthcookie'):
+                                    saml_result['portal_userauthcookie'] = match.group(1)
+                                    if debug:
+                                        print(f"    [DEBUG] Got portal-userauthcookie from response body")
+
+                                # Check for userAuthCookie (alternate name)
+                                match = re.search(r'userAuthCookie["\s:=>]+([^"<\s]+)', body_text, re.IGNORECASE)
+                                if match and not saml_result.get('portal_userauthcookie'):
+                                    saml_result['portal_userauthcookie'] = match.group(1)
+                                    if debug:
+                                        print(f"    [DEBUG] Got userAuthCookie from response body")
+                        except Exception as e:
+                            if debug:
+                                print(f"    [DEBUG] Could not read response body: {e}")
+
+                except Exception as e:
+                    if debug:
+                        print(f"    [DEBUG] Response parse error: {e}")
+
+        page.on("request", handle_request)
+        page.on("response", handle_response)
+
         try:
-            # 1. Open VPN portal
+            # 0. For GP, show prelogin-cookie status and determine start URL
+            start_url = vpn_url
+            if gp_saml_request:
+                # Decode the saml-request to get the actual SAML auth URL
+                import base64
+                try:
+                    saml_url = base64.b64decode(gp_saml_request).decode('utf-8')
+                    if saml_url.startswith('http'):
+                        start_url = saml_url
+                        print(f"  [0/6] Using SAML URL from prelogin.esp")
+                        if debug:
+                            print(f"    [DEBUG] SAML URL: {saml_url[:60]}...")
+                except Exception as e:
+                    if debug:
+                        print(f"    [DEBUG] Could not decode saml-request: {e}")
+
+            if gp_prelogin_cookie:
+                print(f"  [0/6] Got GP prelogin-cookie from prelogin.esp")
+            elif debug and not gp_saml_request:
+                print(f"  [0/6] No prelogin-cookie from prelogin.esp")
+
+            # 1. Open VPN portal or SAML URL
             print("  [1/6] Opening VPN portal...")
-            page.goto(vpn_url, timeout=30000, wait_until="domcontentloaded")
+            page.goto(start_url, timeout=30000, wait_until="domcontentloaded")
+            if debug:
+                page.screenshot(path="/tmp/vpn-step1-portal.png")
+                print("    [DEBUG] Screenshot: /tmp/vpn-step1-portal.png")
 
             # 2. Enter username on Microsoft login
             print("  [2/6] Entering username...")
             page.wait_for_selector('input[name="loginfmt"]', timeout=10000)
+            if debug:
+                page.screenshot(path="/tmp/vpn-step2-before-username.png")
+                print("    [DEBUG] Screenshot: /tmp/vpn-step2-before-username.png")
             page.fill('input[name="loginfmt"]', username)
-            page.click('input[type="submit"]')
+            time.sleep(0.5)  # Brief pause for page stability
+            # Try multiple submit button selectors
+            clicked = False
+            for selector in ['#idSIButton9', 'input[type="submit"]', 'button[type="submit"]']:
+                try:
+                    btn = page.query_selector(selector)
+                    if btn and btn.is_visible():
+                        btn.click(force=True)
+                        clicked = True
+                        break
+                except:
+                    continue
+            if not clicked:
+                page.keyboard.press('Enter')
             page.wait_for_load_state("domcontentloaded")
 
-            # 3. Handle password entry - either direct or via "Use your password instead"
+            # 3. Handle password entry
             print("  [3/6] Entering password...")
 
-            # First check if password field is already visible
-            password_field = page.query_selector('input[name="passwd"]:visible')
+            # Password field selectors (different org pages use different names)
+            password_selectors = [
+                'input[name="passwd"]',
+                'input[name="password"]',
+                'input[type="password"]',
+                'input[name="Password"]',
+                'input[name="Passwd"]',
+                '#passwordInput',
+                '#password',
+                '#i0118',  # Microsoft password field ID
+            ]
+
+            def find_password_field():
+                """Quick check for any visible password field that's ready for input."""
+                for selector in password_selectors:
+                    try:
+                        pf = page.query_selector(selector)
+                        if pf and pf.is_visible():
+                            # Make sure it's actually interactable (not in a transitioning page)
+                            box = pf.bounding_box()
+                            if box and box['width'] > 50 and box['height'] > 10:
+                                # Additional check: ensure the page has the password field in focus area
+                                return pf
+                    except:
+                        continue
+                return None
+
+            # Track URL to detect redirects
+            initial_url = page.url
+
+            # Quick check first (for fast cases like FHNW)
+            password_field = find_password_field()
+
+            # If not found immediately, wait for redirect/page load (federated login like unibas)
+            if not password_field:
+                print("    -> Waiting for login page...")
+
+                max_wait = 30  # seconds
+                waited = 0
+                url_changed = False
+
+                while not password_field and waited < max_wait:
+                    # Wait a bit then check again
+                    time.sleep(0.5)
+                    waited += 0.5
+
+                    # Check if URL changed (redirect happened)
+                    current_url = page.url
+                    if current_url != initial_url and not url_changed:
+                        url_changed = True
+                        if debug:
+                            print(f"    [DEBUG] Redirect detected: {current_url[:80]}...")
+                        # Wait extra for new page to fully load
+                        time.sleep(1)
+                        page.wait_for_load_state("domcontentloaded")
+
+                    password_field = find_password_field()
+                    if password_field:
+                        break
+
+                    # Every 3 seconds, try clicking "Use password" option if visible
+                    if waited % 3 == 0:
+                        password_link_selectors = [
+                            '#idA_PWD_SwitchToPassword',
+                            'a:has-text("Use your password instead")',
+                            'a:has-text("password instead")',
+                            'a:has-text("Use a password")',
+                            '#idA_PWD_SwitchToCredPicker',
+                        ]
+                        for selector in password_link_selectors:
+                            try:
+                                link = page.query_selector(selector)
+                                if link and link.is_visible():
+                                    link.click()
+                                    print("    -> Clicked password login option")
+                                    time.sleep(1)
+                                    password_field = find_password_field()
+                                    break
+                            except:
+                                continue
+
+                    # Debug progress every 5 seconds
+                    if debug and waited % 5 == 0:
+                        print(f"    -> Still waiting... ({int(waited)}s)")
+                        page.screenshot(path=f"/tmp/vpn-step3-wait-{int(waited)}.png")
+
+            if debug:
+                page.screenshot(path="/tmp/vpn-step3-before-password.png")
+                print("    [DEBUG] Screenshot: /tmp/vpn-step3-before-password.png")
+                print(f"    [DEBUG] Current URL: {page.url}")
 
             if not password_field:
-                # Password not visible - look for "Use your password instead" link
-                print("    -> Looking for password login option...")
-                password_link_selectors = [
-                    '#idA_PWD_SwitchToPassword',  # Common Microsoft ID
-                    'a:has-text("Use your password instead")',
-                    'a:has-text("password instead")',
-                    'a:has-text("Use a password")',
-                    '#idA_PWD_SwitchToCredPicker',
-                ]
-
-                link_clicked = False
-                for selector in password_link_selectors:
-                    try:
-                        link = page.wait_for_selector(selector, timeout=3000)
-                        if link:
-                            link.click()
-                            page.wait_for_load_state("domcontentloaded")
-                            print("    -> Switched to password login")
-                            link_clicked = True
-                            break
-                    except PWTimeout:
-                        continue
-
-                if not link_clicked:
-                    # Maybe it's showing authenticator app prompt - wait briefly
-                    time.sleep(0.5)
-                    password_field = page.query_selector('input[name="passwd"]:visible')
-
-            # Now wait for password field
-            try:
-                page.wait_for_selector('input[name="passwd"]', timeout=5000, state="visible")
-                print("    -> Password field ready")
-            except PWTimeout:
                 if debug:
                     page.screenshot(path="/tmp/vpn-password-wait.png")
-                    print(f"  {YELLOW}Screenshot: /tmp/vpn-password-wait.png{NC}")
-                raise
+                    print("    [DEBUG] Screenshot: /tmp/vpn-password-wait.png")
+                raise Exception("Password field not found after waiting")
 
-            page.fill('input[name="passwd"]', password)
-            page.click('input[type="submit"]')
+            print("    -> Password field ready")
+            password_field.fill(password)
+            time.sleep(0.5)  # Brief pause for page stability
+
+            # Wait for page to stabilize after password fill
+            time.sleep(0.5)
+
+            if debug:
+                page.screenshot(path="/tmp/vpn-step3-after-password-fill.png")
+                print("    [DEBUG] Screenshot: /tmp/vpn-step3-after-password-fill.png")
+                print(f"    [DEBUG] Current URL for submit: {page.url[:60]}...")
+
+            # Try multiple submit button selectors
+            # Order matters: check org-specific first, then generic
+            clicked = False
+            submit_selectors = [
+                # ADFS-specific (login.unibas.ch style)
+                '#submitButton',          # ADFS submit button ID
+                'span#submitButton',      # ADFS span with ID
+                'span.submit.modifiedSignIn',  # ADFS submit class
+                # Microsoft-specific
+                '#idSIButton9',           # Microsoft standard
+                # Generic fallbacks
+                'span:has-text("Sign in")',
+                'button:has-text("Sign in")',
+                'input[type="submit"]',
+                'button[type="submit"]',
+                '.button_primary',
+            ]
+            for selector in submit_selectors:
+                try:
+                    btn = page.query_selector(selector)
+                    if btn and btn.is_visible():
+                        if debug:
+                            print(f"    [DEBUG] Clicking submit: {selector}")
+                        btn.click(force=True)
+                        clicked = True
+                        break
+                except:
+                    continue
+            if not clicked:
+                # Last resort: press Enter
+                if debug:
+                    print("    [DEBUG] No submit button found, pressing Enter")
+                page.keyboard.press('Enter')
             page.wait_for_load_state("domcontentloaded")
 
             # 4. Handle 2FA
             print("  [4/6] Entering 2FA code...")
+            time.sleep(3)  # Wait for 2FA page to fully load
+            if debug:
+                page.screenshot(path="/tmp/vpn-step4-2fa-page.png")
+                print("    [DEBUG] Screenshot: /tmp/vpn-step4-2fa-page.png")
+                # Also dump page HTML for selector debugging
+                html = page.content()
+                with open("/tmp/vpn-step4-2fa-page.html", "w") as f:
+                    f.write(html)
+                print("    [DEBUG] HTML saved: /tmp/vpn-step4-2fa-page.html")
+                # Debug: print current URL
+                print(f"    [DEBUG] Current URL: {page.url}")
 
-            # First check if TOTP input is already visible
-            otp_input = page.query_selector('#idTxtBx_SAOTCC_OTC:visible, input[name="otc"]:visible')
-
-            if not otp_input:
-                # Might be showing Authenticator app approval - switch to TOTP
-                print("    -> Looking for TOTP code option...")
-                totp_link_selectors = [
-                    'a:has-text("I can\'t use my Microsoft Authenticator app right now")',
-                    'a:has-text("use a verification code")',
-                    'a:has-text("verify another way")',
-                    '#signInAnotherWay',
-                    'a:has-text("Sign in another way")',
-                ]
-
-                for selector in totp_link_selectors:
-                    try:
-                        link = page.wait_for_selector(selector, timeout=2000)
-                        if link:
-                            link.click()
-                            page.wait_for_load_state("domcontentloaded")
-                            print("    -> Switched to TOTP code entry")
-                            break
-                    except PWTimeout:
-                        continue
-
-                # After clicking, need to select "Use a verification code" from the list
-
-                code_option_clicked = False
-                code_option_selectors = [
-                    'div[data-value="PhoneAppOTP"]',
-                    '[data-testid="PhoneAppOTP"]',
-                ]
-
-                for selector in code_option_selectors:
-                    try:
-                        code_option = page.wait_for_selector(selector, timeout=2000)
-                        if code_option:
-                            code_option.click()
-                            code_option_clicked = True
-                            print("    -> Selected verification code method")
-                            break
-                    except PWTimeout:
-                        continue
-
-                # Fallback: click by text content
-                if not code_option_clicked:
-                    try:
-                        page.get_by_text("Use a verification code").click()
-                        code_option_clicked = True
-                        print("    -> Selected verification code method (by text)")
-                    except:
-                        pass
-
-                page.wait_for_load_state("domcontentloaded")
-
-            # Now try to find and fill TOTP input
-            otp_entered = False
+            # OTP input selectors (used multiple times)
             otp_selectors = [
                 '#idTxtBx_SAOTCC_OTC',
                 'input[name="otc"]',
                 'input[data-testid="otc"]',
                 'input[placeholder*="code"]',
+                'input[aria-label*="code"]',
             ]
 
-            for selector in otp_selectors:
-                try:
-                    otp_input = page.wait_for_selector(selector, timeout=3000, state="visible")
-                    if otp_input:
-                        # Generate TOTP code NOW if using auto mode
-                        if auto_totp:
-                            otp = generate_totp(totp_secret_or_code)
-                            print(f"    -> Generated TOTP code: {otp}")
-                        else:
-                            otp = totp_secret_or_code
-                        otp_input.fill(otp)
-                        otp_entered = True
-                        print("    -> TOTP code entered")
-                        break
-                except PWTimeout:
-                    continue
+            def find_otp_input():
+                """Try to find a visible OTP input field."""
+                for selector in otp_selectors:
+                    try:
+                        otp = page.query_selector(selector)
+                        if otp and otp.is_visible():
+                            return otp
+                    except:
+                        continue
+                return None
 
-            if otp_entered:
-                # Click submit button
-                submit_selectors = [
-                    '#idSubmit_SAOTCC_Continue',
-                    'input[type="submit"]',
-                    'button[type="submit"]',
-                ]
+            def enter_otp_code(otp_input):
+                """Enter OTP code and submit."""
+                if auto_totp:
+                    otp = generate_totp(totp_secret_or_code)
+                    print(f"    -> Generated TOTP code: {otp}")
+                else:
+                    otp = totp_secret_or_code
+                otp_input.fill(otp)
+                print("    -> TOTP code entered")
+
+                # Submit the code
+                time.sleep(0.3)
+                submit_selectors = ['#idSubmit_SAOTCC_Continue', 'input[type="submit"]', 'button[type="submit"]']
                 for selector in submit_selectors:
                     try:
                         btn = page.query_selector(selector)
-                        if btn:
-                            btn.click()
+                        if btn and btn.is_visible():
+                            btn.click(force=True)
+                            return True
+                    except:
+                        continue
+                # Fallback: press Enter
+                page.keyboard.press('Enter')
+                return True
+
+            otp_entered = False
+
+            # === PATH 1: Direct OTP input (e.g., FHNW) ===
+            otp_input = find_otp_input()
+            if otp_input:
+                print("    -> Found direct TOTP input field")
+                enter_otp_code(otp_input)
+                otp_entered = True
+
+            # === PATH 2: Menu navigation required (e.g., unibas) ===
+            if not otp_entered:
+                print("    -> Looking for 2FA method selection menu...")
+
+                # Step 1: Click "Sign in another way" / "I can't use my Authenticator app"
+                step1_selectors = [
+                    '#signInAnotherWay',
+                    'a#signInAnotherWay',
+                    'a:has-text("I can\'t use my Microsoft Authenticator app right now")',
+                    'a:has-text("Sign in another way")',
+                    'a:has-text("verify another way")',
+                    'a:has-text("Other ways to sign in")',
+                    'a:has-text("Having trouble")',
+                    'a:has-text("Use a different verification option")',
+                    '#idA_SAASTO_LookupLink',
+                ]
+
+                step1_clicked = False
+                for selector in step1_selectors:
+                    try:
+                        link = page.query_selector(selector)
+                        if link and link.is_visible():
+                            link.click(force=True)
+                            time.sleep(0.8)
+                            page.wait_for_load_state("domcontentloaded")
+                            print(f"    -> Clicked: '{selector}'")
+                            step1_clicked = True
                             break
                     except:
                         continue
-            else:
-                print(f"  {YELLOW}Warning: 2FA input not found{NC}")
+
+                if not step1_clicked:
+                    # Try with wait_for_selector for dynamic elements
+                    for selector in step1_selectors:
+                        try:
+                            link = page.wait_for_selector(selector, timeout=1500)
+                            if link and link.is_visible():
+                                link.click(force=True)
+                                time.sleep(0.8)
+                                page.wait_for_load_state("domcontentloaded")
+                                print(f"    -> Clicked (waited): '{selector}'")
+                                step1_clicked = True
+                                break
+                        except PWTimeout:
+                            continue
+
+                if debug:
+                    page.screenshot(path="/tmp/vpn-step4-after-step1.png")
+                    print(f"    [DEBUG] Screenshot: /tmp/vpn-step4-after-step1.png (step1_clicked={step1_clicked})")
+
+                # Check if OTP input appeared after step 1
+                time.sleep(0.5)
+                otp_input = find_otp_input()
+                if otp_input:
+                    print("    -> Found TOTP input after step 1")
+                    enter_otp_code(otp_input)
+                    otp_entered = True
+
+                # Step 2: Select TOTP / verification code option
+                # Try step 2 even if step 1 didn't click anything - options may be directly visible
+                if not otp_entered:
+                    print("    -> Looking for verification code option...")
+                    step2_selectors = [
+                        'div[data-value="PhoneAppOTP"]',
+                        '[data-testid="PhoneAppOTP"]',
+                        'div.tile:has-text("verification code")',
+                        'div.tile:has-text("authenticator app")',
+                        'div:has-text("Use a verification code from my mobile app")',
+                        'div:has-text("Use a verification code")',
+                        'div:has-text("verification code from")',
+                        'div:has-text("authenticator app"):not(:has-text("push notification"))',
+                        'div:has-text("Enter code")',
+                        'div[role="button"]:has-text("code")',
+                    ]
+
+                    step2_clicked = False
+                    for selector in step2_selectors:
+                        try:
+                            option = page.query_selector(selector)
+                            if option and option.is_visible():
+                                option.click(force=True)
+                                time.sleep(0.8)
+                                page.wait_for_load_state("domcontentloaded")
+                                print(f"    -> Selected: '{selector}'")
+                                step2_clicked = True
+                                break
+                        except:
+                            continue
+
+                    if debug:
+                        page.screenshot(path="/tmp/vpn-step4-after-step2.png")
+                        print(f"    [DEBUG] Screenshot: /tmp/vpn-step4-after-step2.png (step2_clicked={step2_clicked})")
+
+                    # Now look for OTP input again
+                    time.sleep(0.5)
+                    otp_input = find_otp_input()
+                    if not otp_input:
+                        # Try waiting for it
+                        for selector in otp_selectors:
+                            try:
+                                otp_input = page.wait_for_selector(selector, timeout=3000, state="visible")
+                                if otp_input:
+                                    break
+                            except PWTimeout:
+                                continue
+
+                    if otp_input:
+                        print("    -> Found TOTP input after step 2")
+                        enter_otp_code(otp_input)
+                        otp_entered = True
+
+            if not otp_entered:
+                print(f"  {YELLOW}Warning: 2FA input not found - may use push notification or no 2FA{NC}")
                 if debug:
                     page.screenshot(path="/tmp/vpn-2fa.png")
-                    print("  Screenshot: /tmp/vpn-2fa.png")
+                # Wait a bit for push notification approval or page to continue
+                time.sleep(3)
 
-            # 5. Handle "Stay signed in?" - click Yes
+            # 5. Handle "Stay signed in?"
             print("  [5/6] Completing login...")
             try:
                 page.wait_for_selector('#idSIButton9', timeout=8000)
-                page.click('#idSIButton9')  # "Yes" button
+                page.click('#idSIButton9')
                 print("    -> Clicked 'Stay signed in'")
             except PWTimeout:
-                pass  # No prompt shown
+                pass
 
             page.wait_for_load_state("domcontentloaded")
 
-            # 6. Wait for redirect back to VPN and get cookies
+            # 6. Get cookies
             print("  [6/6] Getting session cookie...")
-
-            # Wait for VPN page
             try:
                 page.wait_for_url(f"**{vpn_server}**", timeout=15000)
             except PWTimeout:
-                pass  # Might already be there
+                pass
 
-            # Brief wait for cookies to be set
             time.sleep(0.5)
-
-            # Get all cookies
             cookies = context.cookies()
 
-            # Build cookie string for openconnect
-            # Extract domain base for cookie matching
+            if debug:
+                print(f"\n    [DEBUG] All cookies ({len(cookies)}):")
+                for c in cookies:
+                    print(f"      {c['name']}: domain={c.get('domain', 'N/A')}")
+
             domain_parts = vpn_server.split('.')
-            if len(domain_parts) >= 2:
-                base_domain = '.'.join(domain_parts[-2:])
-            else:
-                base_domain = vpn_server
+            base_domain = '.'.join(domain_parts[-2:]) if len(domain_parts) >= 2 else vpn_server
 
             vpn_cookies = {}
+            # GlobalProtect-specific cookies to look for (in priority order)
+            gp_cookie_names = ['portal-userauthcookie', 'portal-prelogonuserauthcookie', 'user', 'prelogin-cookie']
+
             for c in cookies:
                 domain = c.get('domain', '')
-                if vpn_server in domain or domain.endswith(f'.{base_domain}') or domain == f'.{base_domain}':
-                    vpn_cookies[c['name']] = c['value']
+                name = c['name']
+                # Check if it's a GP-specific cookie from any domain
+                if name.lower() in [n.lower() for n in gp_cookie_names]:
+                    vpn_cookies[name] = c['value']
+                    if debug:
+                        print(f"    [DEBUG] Found GP cookie: {name}")
+                # Check for exact VPN domain match (strict filtering)
+                elif domain == vpn_server or domain == f'.{vpn_server}':
+                    vpn_cookies[name] = c['value']
+                    if debug:
+                        print(f"    [DEBUG] VPN domain cookie: {name} (domain={domain})")
+
+            # Add captured SAML data to cookies dict
+            if saml_result['saml_response']:
+                vpn_cookies['SAMLResponse'] = saml_result['saml_response']
+                if debug:
+                    print(f"    [DEBUG] SAMLResponse captured: {len(saml_result['saml_response'])} chars")
+            if saml_result['prelogin_cookie']:
+                vpn_cookies['prelogin-cookie'] = saml_result['prelogin_cookie']
+                if debug:
+                    print(f"    [DEBUG] prelogin-cookie from SAML captured")
+            if saml_result['portal_userauthcookie']:
+                vpn_cookies['portal-userauthcookie'] = saml_result['portal_userauthcookie']
+                if debug:
+                    print(f"    [DEBUG] portal-userauthcookie captured")
+            if saml_result['saml_username']:
+                vpn_cookies['saml-username'] = saml_result['saml_username']
+
+            # Add prelogin-cookie from prelogin.esp (obtained before browser auth)
+            if gp_prelogin_cookie and 'prelogin-cookie' not in vpn_cookies:
+                vpn_cookies['prelogin-cookie'] = gp_prelogin_cookie
+                if debug:
+                    print(f"    [DEBUG] Using prelogin-cookie from prelogin.esp")
+
+            # Store gateway IP for connection (may be different from portal)
+            if gp_gateway_ip:
+                vpn_cookies['_gateway_ip'] = gp_gateway_ip
+                if debug:
+                    print(f"    [DEBUG] Gateway IP stored: {gp_gateway_ip}")
+
+            # NOTE: Do NOT exchange prelogin-cookie for portal-userauthcookie here!
+            # This invalidates the prelogin-cookie. gp-saml-gui doesn't do this.
+            # openconnect handles the portal config exchange automatically.
 
             if debug:
-                print(f"\n  Cookies found: {list(vpn_cookies.keys())}")
+                print(f"\n  Cookies for VPN ({vpn_server}): {list(vpn_cookies.keys())}")
                 page.screenshot(path="/tmp/vpn-final.png")
-                print(f"  Screenshot: /tmp/vpn-final.png")
 
             browser.close()
 
@@ -547,46 +1079,162 @@ def do_saml_auth(vpn_server, username, password, totp_secret_or_code, auto_totp=
             if debug:
                 try:
                     page.screenshot(path="/tmp/vpn-error.png")
-                    print("Screenshot: /tmp/vpn-error.png")
                 except:
                     pass
             browser.close()
             return None
 
 
-def connect_vpn(vpn_server, cookies, test_only=False):
-    """Connect to VPN using openconnect with the obtained cookie.
-
-    Args:
-        vpn_server: VPN server domain
-        cookies: Session cookies dict
-        test_only: If True, just test the cookie validity without staying connected
-
-    Returns:
-        True if connection was successful (or user disconnected), False if auth failed
-    """
+def connect_vpn(vpn_server, protocol, cookies, no_dtls=False, username=None):
+    """Connect to VPN using openconnect with the obtained cookie."""
 
     print(f"\n{GREEN}Connecting to VPN...{NC}\n")
 
-    # Build the cookie string
-    # For Cisco AnyConnect, we need the webvpn cookies
-    cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
+    proto_flag = PROTOCOLS.get(protocol, {}).get("flag", "anyconnect")
 
-    cmd = [
-        "openconnect",
-        "--protocol=anyconnect",
-        f"--cookie={cookie_str}",
-        vpn_server,
-    ]
+    # For GlobalProtect, try different cookie formats
+    # Track which cookie type we're using for --usergroup
+    gp_cookie_type = None
 
-    print(f"  Running: openconnect --protocol=anyconnect --cookie=<session> {vpn_server}")
+    # Check if we have a gateway IP to connect to (different from portal)
+    gateway_target = cookies.pop('_gateway_ip', None) if protocol == "gp" else None
+
+    if protocol == "gp":
+        # GP with SAML: prelogin-cookie from SAML response
+        # Based on gp-saml-gui working command:
+        # - Use --usergroup=portal:prelogin-cookie (portal mode, not gateway)
+        # - Pass cookie via --passwd-on-stdin (not --cookie)
+        # - Use --useragent='PAN GlobalProtect'
+        # - Use --os=linux-64
+        if 'prelogin-cookie' in cookies:
+            cookie_str = cookies['prelogin-cookie']
+            # Portal mode with prelogin-cookie (matches gp-saml-gui)
+            gp_cookie_type = 'portal:prelogin-cookie'
+            print(f"  Using prelogin-cookie (portal mode)")
+        elif 'portal-userauthcookie' in cookies:
+            cookie_str = cookies['portal-userauthcookie']
+            # Try gateway mode with portal-userauthcookie
+            gp_cookie_type = 'gateway:portal-userauthcookie'
+            print(f"  Using portal-userauthcookie (gateway mode)")
+        elif 'SAMLResponse' in cookies:
+            # SAMLResponse as fallback - this is what we POST to VPN, not ideal
+            cookie_str = cookies['SAMLResponse']
+            gp_cookie_type = 'prelogin-cookie'  # Try as prelogin-cookie
+            print(f"  Using SAMLResponse ({len(cookie_str)} chars) - may not work")
+        elif 'SESSID' in cookies:
+            cookie_str = cookies['SESSID']
+            gp_cookie_type = 'portal-userauthcookie'  # SESSID is portal session
+            print(f"  Using SESSID - may not work for GP SAML")
+        else:
+            # Fallback to all cookies in name=value format
+            cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
+            gp_cookie_type = 'portal-userauthcookie'
+            print(f"  Using combined cookies")
+    else:
+        # AnyConnect uses name=value format
+        cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
+
+    # For GP portal mode, always use the portal hostname (not gateway IP)
+    # OpenConnect handles the portal→gateway flow automatically
+    connect_target = vpn_server
+
+    # For GP with SAML, use --passwd-on-stdin to pass cookie (like gp-saml-gui)
+    use_stdin_cookie = protocol == "gp" and 'prelogin-cookie' in cookies
+
+    if use_stdin_cookie:
+        cmd = [
+            "openconnect",
+            "--verbose",
+            f"--protocol={proto_flag}",
+            "--passwd-on-stdin",
+            connect_target,
+        ]
+    else:
+        cmd = [
+            "openconnect",
+            "--verbose",
+            f"--protocol={proto_flag}",
+            f"--cookie={cookie_str}",
+            connect_target,
+        ]
+
+    # Add username and usergroup for GlobalProtect
+    if protocol == "gp":
+        # GP needs --os parameter and useragent for proper identification
+        # Using linux-64 and 'PAN GlobalProtect' as per gp-saml-gui
+        cmd.insert(2, "--os=linux-64")
+        cmd.insert(2, "--useragent=PAN GlobalProtect")
+        if username:
+            cmd.insert(2, f"--user={username}")
+        # For GP SAML, specify the cookie type we're using
+        if gp_cookie_type:
+            cmd.insert(2, f"--usergroup={gp_cookie_type}")
+
+    if no_dtls:
+        cmd.insert(2, "--no-dtls")
+
+    display_cmd = f"openconnect --verbose --protocol={proto_flag}"
+    if no_dtls:
+        display_cmd += " --no-dtls"
+    if protocol == "gp":
+        display_cmd += " --useragent='PAN GlobalProtect' --os=linux-64"
+        if gp_cookie_type:
+            display_cmd += f" --usergroup={gp_cookie_type}"
+        if username:
+            display_cmd += f" --user={username}"
+    if use_stdin_cookie:
+        display_cmd += f" --passwd-on-stdin {connect_target}"
+        print(f"  Running: echo '<cookie>' | {display_cmd}")
+        # Debug: show cookie length and first/last chars
+        print(f"    [DEBUG] Cookie length: {len(cookie_str)}, starts: {cookie_str[:20]}..., ends: ...{cookie_str[-10:]}")
+    else:
+        display_cmd += f" --cookie=<session> {connect_target}"
+        print(f"  Running: {display_cmd}")
     print()
 
-    process = subprocess.Popen(cmd)
-    returncode = process.wait()
+    if use_stdin_cookie:
+        # Write cookie to named file for manual verification
+        cookie_file = '/tmp/gp_cookie.txt'
+        print(f"    [DEBUG] Writing cookie to {cookie_file}")
+        with open(cookie_file, 'w') as f:
+            f.write(cookie_str)  # No newline - match gp-saml-gui
 
-    # Check if connection failed due to auth issues
-    # returncode 2 = cookie rejected/auth failure
+        # Properly quote command arguments for shell
+        cmd_quoted = shlex.join(cmd)
+
+        # Print manual command for testing
+        print(f"\n    [DEBUG] MANUAL TEST: Run this command yourself:")
+        print(f"    echo {shlex.quote(cookie_str)} | sudo {cmd_quoted}")
+        print()
+
+        # Use dup2 + execvp exactly like gp-saml-gui
+        # gp-saml-gui adds sudo to the command - we do too for stdin handling
+        print(f"    [DEBUG] Using dup2 + execvp with sudo (gp-saml-gui method)...")
+
+        # IMPORTANT: Cache sudo credentials BEFORE redirecting stdin
+        # Otherwise sudo will try to read password from the cookie file!
+        print(f"    [DEBUG] Caching sudo credentials (required before stdin redirect)...")
+        subprocess.run(["sudo", "-v"], check=True)
+
+        # Use a named temp file that persists (TemporaryFile gets deleted on close)
+        # We need to keep the fd open, so we use os.open directly
+        cookie_fd = os.open(cookie_file, os.O_RDONLY)
+        os.dup2(cookie_fd, 0)  # Redirect stdin to cookie file
+        os.close(cookie_fd)    # Close our copy, but stdin (fd 0) remains open
+
+        # Add sudo to command like gp-saml-gui does
+        sudo_cmd = ["sudo"] + cmd
+
+        # execvp replaces current process - this never returns on success
+        os.execvp(sudo_cmd[0], sudo_cmd)
+        # If we get here, exec failed
+        returncode = 1
+    else:
+        # Use sudo for openconnect since we're running as normal user
+        sudo_cmd = ["sudo"] + cmd
+        process = subprocess.Popen(sudo_cmd)
+        returncode = process.wait()
+
     if returncode == 2:
         print(f"\n{YELLOW}Cookie was rejected by server.{NC}")
         return False
@@ -594,17 +1242,10 @@ def connect_vpn(vpn_server, cookies, test_only=False):
 
 
 def disconnect(force=False):
-    """Kill any running openconnect process.
-
-    Args:
-        force: If True, send SIGTERM (allows BYE packet) and clear cookie cache.
-               If False, send SIGKILL (no BYE, session stays valid).
-    """
+    """Kill any running openconnect process."""
     signal_flag = "-TERM" if force else "-KILL"
-    result = subprocess.run(
-        ["pkill", signal_flag, "-f", "openconnect"],
-        capture_output=True
-    )
+    # Use sudo since openconnect runs as root
+    result = subprocess.run(["sudo", "pkill", signal_flag, "-f", "openconnect"], capture_output=True)
     if result.returncode == 0:
         if force:
             clear_stored_cookies()
@@ -617,28 +1258,18 @@ def disconnect(force=False):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="OpenConnect VPN with Microsoft SSO authentication"
+        description="OpenConnect VPN with Microsoft SSO authentication (AnyConnect & GlobalProtect)"
     )
-    parser.add_argument("--visible", action="store_true",
-                        help="Show browser window for debugging")
-    parser.add_argument("--debug", action="store_true",
-                        help="Enable debug output and screenshots")
-    parser.add_argument("--disconnect", "-d", action="store_true",
-                        help="Disconnect from VPN (keeps session alive for reconnect)")
-    parser.add_argument("--force-disconnect", action="store_true",
-                        help="Disconnect and terminate session (invalidates cookie)")
-    parser.add_argument("--setup", "-s", action="store_true",
-                        help="Setup VPN configuration in keyring")
-    parser.add_argument("--clear", action="store_true",
-                        help="Clear stored configuration from keyring")
-    parser.add_argument("--no-cache", action="store_true",
-                        help="Force re-authentication, ignore cached cookie")
-    # Internal args for passing credentials through sudo
-    parser.add_argument("--_domain", help=argparse.SUPPRESS)
-    parser.add_argument("--_user", help=argparse.SUPPRESS)
-    parser.add_argument("--_pass", help=argparse.SUPPRESS)
-    parser.add_argument("--_totp", help=argparse.SUPPRESS)
-    parser.add_argument("--_cookies", help=argparse.SUPPRESS)
+    parser.add_argument("name", nargs="?", help="Connection name to connect to")
+    parser.add_argument("--visible", action="store_true", help="Show browser window for debugging")
+    parser.add_argument("--debug", action="store_true", help="Enable debug output and screenshots")
+    parser.add_argument("--disconnect", "-d", action="store_true", help="Disconnect (keep session alive)")
+    parser.add_argument("--force-disconnect", action="store_true", help="Disconnect and terminate session")
+    parser.add_argument("--setup", "-s", action="store_true", help="Add/edit VPN connection")
+    parser.add_argument("--list", "-l", action="store_true", help="List saved connections")
+    parser.add_argument("--delete", action="store_true", help="Delete connection from keyring")
+    parser.add_argument("--no-cache", action="store_true", help="Force re-authentication")
+    parser.add_argument("--no-dtls", action="store_true", help="Disable DTLS (use TCP only)")
 
     args = parser.parse_args()
 
@@ -652,89 +1283,71 @@ def main():
         disconnect(force=True)
         return
 
+    if args.list:
+        list_connections()
+        return
+
     if args.setup:
-        setup_config()
+        setup_config(edit_name=args.name)
         return
 
-    if args.clear:
-        clear_config()
+    if args.delete:
+        delete_config(name=args.name)
         return
 
-    # Get config BEFORE sudo (keyring access works better as normal user)
-    if os.geteuid() != 0:
-        # Not root yet - get config now while we can access keyring
-        vpn_domain, username, password, totp_secret_or_code, auto_totp = get_config()
+    # New architecture: run EVERYTHING as normal user except openconnect
+    # This matches gp-saml-gui which only uses sudo at the very end for execvp
 
-        # Check for cached cookies (unless --no-cache)
-        cached_cookies = None
-        if not args.no_cache:
-            cached_cookies = get_stored_cookies()
-            if cached_cookies:
-                print(f"{GREEN}Found cached session cookie.{NC}")
-
-        print(f"{YELLOW}OpenConnect requires root privileges.{NC}")
-        # Pass config through to sudo invocation
-        # Explicitly pass DBUS for keyring access as root
-        dbus_addr = os.environ.get('DBUS_SESSION_BUS_ADDRESS', f"unix:path=/run/user/{os.getuid()}/bus")
-        sudo_args = ["sudo", f"DBUS_SESSION_BUS_ADDRESS={dbus_addr}", sys.executable] + sys.argv
-        sudo_args.extend(["--_domain", vpn_domain, "--_user", username, "--_pass", password])
-        if auto_totp:
-            sudo_args.extend(["--_totp", totp_secret_or_code])
-        else:
-            sudo_args.extend(["--_totp", f"CODE:{totp_secret_or_code}"])
-        if cached_cookies:
-            sudo_args.extend(["--_cookies", json.dumps(cached_cookies)])
-        os.execvp("sudo", sudo_args)
-
-    # Running as root - get config from args or prompt
-    if args._domain and args._user and args._pass and args._totp:
-        vpn_domain = args._domain
-        username = args._user
-        password = args._pass
-        if args._totp.startswith("CODE:"):
-            totp_secret_or_code = args._totp[5:]
-            auto_totp = False
-        else:
-            totp_secret_or_code = args._totp
-            auto_totp = True
-        print(f"{GREEN}VPN Server: {vpn_domain}{NC}")
-        print(f"{GREEN}Using stored credentials for: {username}{NC}")
-        print(f"{GREEN}TOTP code will be generated automatically.{NC}\n")
+    # Determine which connection to use
+    if args.name:
+        conn_name = args.name
     else:
-        vpn_domain, username, password, totp_secret_or_code, auto_totp = get_config()
+        conn_name = select_connection()
 
-    # Check for cached cookies passed from non-root invocation
+    conn_name, address, protocol, username, password, totp_secret = get_config(conn_name)
+
+    if not all([conn_name, address, protocol, username, password, totp_secret]):
+        print(f"{RED}Connection not found or incomplete. Use --setup to configure.{NC}")
+        sys.exit(1)
+
+    print(f"{GREEN}Connection: {conn_name}{NC}")
+    print(f"{GREEN}VPN Server: {address}{NC}")
+    print(f"{GREEN}Protocol: {PROTOCOLS.get(protocol, {}).get('name', protocol)}{NC}")
+    print(f"{GREEN}Username: {username}{NC}")
+    print(f"{GREEN}TOTP code will be generated automatically.{NC}\n")
+
+    # Check for cached cookies
     cached_cookies = None
-    if args._cookies and not args.no_cache:
-        try:
-            cached_cookies = json.loads(args._cookies)
-        except:
-            pass
+    if not args.no_cache:
+        cached_cookies = get_stored_cookies(conn_name)
+        if cached_cookies:
+            print(f"{GREEN}Found cached session cookie.{NC}")
 
-    # Try cached cookies first
+    # Determine no_dtls flag
+    no_dtls = args.no_dtls
+
+    # Try cached cookies first (need sudo for openconnect)
     if cached_cookies:
         print(f"{CYAN}Trying cached session cookie...{NC}")
-        success = connect_vpn(vpn_domain, cached_cookies)
+        success = connect_vpn(address, protocol, cached_cookies, no_dtls=no_dtls, username=username)
         if success:
-            return  # User disconnected or connection ended normally
+            return
         else:
             print(f"{YELLOW}Cached cookie expired or invalid. Re-authenticating...{NC}\n")
-            clear_stored_cookies()  # Clear invalid cookies
+            clear_stored_cookies(conn_name)
             cached_cookies = None
 
-    # Authenticate via browser
+    # Authenticate via browser (runs as normal user - better for Playwright)
     cookies = do_saml_auth(
-        vpn_domain, username, password, totp_secret_or_code,
-        auto_totp=auto_totp,
+        address, username, password, totp_secret,
+        auto_totp=True,
         headless=not args.visible,
         debug=args.debug
     )
 
     if cookies:
-        # Store cookies for reuse (need to do this as root, will try)
-        # Note: This might not work as root, but we try anyway
-        store_cookies(cookies)
-        connect_vpn(vpn_domain, cookies)
+        store_cookies(conn_name, cookies)
+        connect_vpn(address, protocol, cookies, no_dtls=no_dtls, username=username)
     else:
         print(f"\n{RED}Authentication failed.{NC}")
         print(f"Try with --visible to see the browser window.")
