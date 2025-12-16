@@ -34,6 +34,7 @@ import time
 import json
 import tempfile
 import shlex
+import re
 
 KEYRING_SERVICE = "ms-sso-openconnect"
 CONNECTIONS_KEY = "connections"
@@ -146,14 +147,22 @@ def _get_cookie_file(name):
     return os.path.join(cache_dir, f"session_{safe_name}.json")
 
 
-def store_cookies(name, cookies):
-    """Store session cookies in a secure file."""
+def store_cookies(name, cookies, usergroup=None):
+    """Store session cookies in a secure file.
+
+    Args:
+        name: Connection name
+        cookies: Cookie dictionary
+        usergroup: Optional usergroup (e.g., 'portal:prelogin-cookie' or 'portal:portal-userauthcookie')
+    """
     try:
         cookie_file = _get_cookie_file(name)
         data = {
             "cookies": cookies,
             "timestamp": int(time.time())
         }
+        if usergroup:
+            data["usergroup"] = usergroup
         with open(cookie_file, 'w') as f:
             json.dump(data, f)
         os.chmod(cookie_file, 0o600)
@@ -178,7 +187,12 @@ def store_cookies(name, cookies):
 
 
 def get_stored_cookies(name, max_age_hours=12):
-    """Retrieve cached session cookies from file."""
+    """Retrieve cached session cookies from file.
+
+    Returns:
+        Tuple of (cookies_dict, usergroup) or None if no valid cache.
+        usergroup may be None if not set.
+    """
     try:
         cookie_file = _get_cookie_file(name)
         if not os.path.exists(cookie_file):
@@ -192,7 +206,9 @@ def get_stored_cookies(name, max_age_hours=12):
             clear_stored_cookies(name)
             return None
 
-        return data.get("cookies")
+        cookies = data.get("cookies")
+        usergroup = data.get("usergroup")
+        return (cookies, usergroup)
     except Exception:
         return None
 
@@ -1085,8 +1101,17 @@ def do_saml_auth(vpn_server, username, password, totp_secret_or_code, auto_totp=
             return None
 
 
-def connect_vpn(vpn_server, protocol, cookies, no_dtls=False, username=None):
-    """Connect to VPN using openconnect with the obtained cookie."""
+def connect_vpn(vpn_server, protocol, cookies, no_dtls=False, username=None, allow_fallback=False,
+                connection_name=None, cached_usergroup=None):
+    """Connect to VPN using openconnect with the obtained cookie.
+
+    If allow_fallback=True, use subprocess so we can return on failure.
+    If allow_fallback=False, use execvp which replaces the process (no return).
+
+    Args:
+        connection_name: Connection name for updating cookie cache
+        cached_usergroup: Cached usergroup from previous connection (e.g., 'portal:portal-userauthcookie')
+    """
 
     print(f"\n{GREEN}Connecting to VPN...{NC}\n")
 
@@ -1106,16 +1131,32 @@ def connect_vpn(vpn_server, protocol, cookies, no_dtls=False, username=None):
         # - Pass cookie via --passwd-on-stdin (not --cookie)
         # - Use --useragent='PAN GlobalProtect'
         # - Use --os=linux-64
-        if 'prelogin-cookie' in cookies:
+
+        # Use cached usergroup if available (e.g., portal:portal-userauthcookie)
+        # This means we have a long-lived cookie from a previous connection
+        if cached_usergroup:
+            print(f"  Using cached usergroup: {cached_usergroup}")
+            gp_cookie_type = cached_usergroup
+            # Get the cookie value - try portal-userauthcookie first if usergroup suggests it
+            if 'portal-userauthcookie' in cookies:
+                cookie_str = cookies['portal-userauthcookie']
+                print(f"  Using portal-userauthcookie (long-lived)")
+            elif 'prelogin-cookie' in cookies:
+                cookie_str = cookies['prelogin-cookie']
+                print(f"  Using prelogin-cookie")
+            else:
+                cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
+                print(f"  Using combined cookies")
+        elif 'prelogin-cookie' in cookies:
             cookie_str = cookies['prelogin-cookie']
             # Portal mode with prelogin-cookie (matches gp-saml-gui)
             gp_cookie_type = 'portal:prelogin-cookie'
             print(f"  Using prelogin-cookie (portal mode)")
         elif 'portal-userauthcookie' in cookies:
             cookie_str = cookies['portal-userauthcookie']
-            # Try gateway mode with portal-userauthcookie
-            gp_cookie_type = 'gateway:portal-userauthcookie'
-            print(f"  Using portal-userauthcookie (gateway mode)")
+            # Portal mode with portal-userauthcookie (long-lived)
+            gp_cookie_type = 'portal:portal-userauthcookie'
+            print(f"  Using portal-userauthcookie (portal mode)")
         elif 'SAMLResponse' in cookies:
             # SAMLResponse as fallback - this is what we POST to VPN, not ideal
             cookie_str = cookies['SAMLResponse']
@@ -1197,7 +1238,8 @@ def connect_vpn(vpn_server, protocol, cookies, no_dtls=False, username=None):
         cookie_file = '/tmp/gp_cookie.txt'
         print(f"    [DEBUG] Writing cookie to {cookie_file}")
         with open(cookie_file, 'w') as f:
-            f.write(cookie_str)  # No newline - match gp-saml-gui
+            f.write(cookie_str)
+            f.write('\n')  # Newline required for openconnect stdin
 
         # Properly quote command arguments for shell
         cmd_quoted = shlex.join(cmd)
@@ -1207,36 +1249,72 @@ def connect_vpn(vpn_server, protocol, cookies, no_dtls=False, username=None):
         print(f"    echo {shlex.quote(cookie_str)} | sudo {cmd_quoted}")
         print()
 
-        # Use dup2 + execvp exactly like gp-saml-gui
-        # gp-saml-gui adds sudo to the command - we do too for stdin handling
-        print(f"    [DEBUG] Using dup2 + execvp with sudo (gp-saml-gui method)...")
-
         # IMPORTANT: Cache sudo credentials BEFORE redirecting stdin
         # Otherwise sudo will try to read password from the cookie file!
         print(f"    [DEBUG] Caching sudo credentials (required before stdin redirect)...")
         subprocess.run(["sudo", "-v"], check=True)
 
-        # Use a named temp file that persists (TemporaryFile gets deleted on close)
-        # We need to keep the fd open, so we use os.open directly
-        cookie_fd = os.open(cookie_file, os.O_RDONLY)
-        os.dup2(cookie_fd, 0)  # Redirect stdin to cookie file
-        os.close(cookie_fd)    # Close our copy, but stdin (fd 0) remains open
-
-        # Add sudo to command like gp-saml-gui does
         sudo_cmd = ["sudo"] + cmd
 
-        # execvp replaces current process - this never returns on success
-        os.execvp(sudo_cmd[0], sudo_cmd)
-        # If we get here, exec failed
-        returncode = 1
+        # Use subprocess with os.pipe() for stdin and stdout capture
+        # This allows us to:
+        # 1. Pass cookie via stdin
+        # 2. Capture stdout to look for portal-userauthcookie (long-lived cookie)
+        # 3. Return on failure (allow_fallback)
+        print(f"    [DEBUG] Using subprocess with pipe (captures stdout for portal-userauthcookie)...")
+
+        # Create pipe for stdin
+        read_fd, write_fd = os.pipe()
+        cookie_bytes = (cookie_str + '\n').encode()
+        os.write(write_fd, cookie_bytes)
+        os.close(write_fd)  # Close write end to signal EOF
+
+        # Run openconnect with stdin from pipe and stdout captured
+        process = subprocess.Popen(
+            sudo_cmd,
+            stdin=read_fd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,  # Combine stderr with stdout
+            text=True,
+            bufsize=1,  # Line-buffered
+        )
+        os.close(read_fd)  # Close our copy of read end
+
+        # Read stdout line by line, print to terminal, and look for portal-userauthcookie
+        portal_cookie = None
+        try:
+            for line in process.stdout:
+                # Print line to terminal (user can see what's happening)
+                print(line, end='')
+
+                # Look for portal-userauthcookie in output
+                # OpenConnect outputs: "GlobalProtect login returned portal-userauthcookie=XXX"
+                if 'portal-userauthcookie=' in line and protocol == "gp":
+                    # Extract cookie value
+                    match = re.search(r'portal-userauthcookie=(\S+)', line)
+                    if match:
+                        portal_cookie = match.group(1)
+                        if portal_cookie.lower() != 'empty':
+                            print(f"\n    [DEBUG] Captured portal-userauthcookie: {portal_cookie[:20]}...")
+        except KeyboardInterrupt:
+            # User pressed Ctrl+C, terminate openconnect gracefully
+            process.terminate()
+
+        returncode = process.wait()
+
+        # If we got a portal-userauthcookie, update the cache with this long-lived cookie
+        if portal_cookie and connection_name and portal_cookie.lower() != 'empty':
+            print(f"\n{GREEN}Updating cache with long-lived portal-userauthcookie...{NC}")
+            new_cookies = {'portal-userauthcookie': portal_cookie}
+            store_cookies(connection_name, new_cookies, usergroup='portal:portal-userauthcookie')
     else:
         # Use sudo for openconnect since we're running as normal user
         sudo_cmd = ["sudo"] + cmd
         process = subprocess.Popen(sudo_cmd)
         returncode = process.wait()
 
-    if returncode == 2:
-        print(f"\n{YELLOW}Cookie was rejected by server.{NC}")
+    if returncode != 0:
+        print(f"\n{YELLOW}Connection failed (exit code {returncode}).{NC}")
         return False
     return True
 
@@ -1318,10 +1396,14 @@ def main():
 
     # Check for cached cookies
     cached_cookies = None
+    cached_usergroup = None
     if not args.no_cache:
-        cached_cookies = get_stored_cookies(conn_name)
-        if cached_cookies:
+        cached_result = get_stored_cookies(conn_name)
+        if cached_result:
+            cached_cookies, cached_usergroup = cached_result
             print(f"{GREEN}Found cached session cookie.{NC}")
+            if cached_usergroup:
+                print(f"  Cached usergroup: {cached_usergroup}")
 
     # Determine no_dtls flag
     no_dtls = args.no_dtls
@@ -1329,7 +1411,10 @@ def main():
     # Try cached cookies first (need sudo for openconnect)
     if cached_cookies:
         print(f"{CYAN}Trying cached session cookie...{NC}")
-        success = connect_vpn(address, protocol, cached_cookies, no_dtls=no_dtls, username=username)
+        # Use allow_fallback=True so we can retry with fresh SAML auth if cookie expired
+        success = connect_vpn(address, protocol, cached_cookies.copy(), no_dtls=no_dtls,
+                             username=username, allow_fallback=True,
+                             connection_name=conn_name, cached_usergroup=cached_usergroup)
         if success:
             return
         else:
@@ -1346,8 +1431,10 @@ def main():
     )
 
     if cookies:
-        store_cookies(conn_name, cookies)
-        connect_vpn(address, protocol, cookies, no_dtls=no_dtls, username=username)
+        # Store with initial usergroup for prelogin-cookie
+        store_cookies(conn_name, cookies, usergroup='portal:prelogin-cookie')
+        connect_vpn(address, protocol, cookies, no_dtls=no_dtls, username=username,
+                   connection_name=conn_name)
     else:
         print(f"\n{RED}Authentication failed.{NC}")
         print(f"Try with --visible to see the browser window.")
