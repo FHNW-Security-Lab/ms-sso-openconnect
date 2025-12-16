@@ -252,7 +252,13 @@ def list_connections():
 def setup_config(edit_name=None):
     """Interactive setup to add or edit a VPN connection."""
     print(f"{CYAN}=== MS SSO OpenConnect Setup ==={NC}\n")
-    print("Your configuration will be stored securely in GNOME keyring.\n")
+    if sys.platform == "darwin":
+        keyring_name = "Apple Keychain"
+    elif sys.platform == "linux":
+        keyring_name = "system keyring (GNOME Keyring/KWallet)"
+    else:
+        keyring_name = "system keychain"
+    print(f"Your configuration will be stored securely in {keyring_name}.\n")
 
     connections = get_all_connections()
 

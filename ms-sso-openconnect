@@ -10,7 +10,13 @@ PYTHON_SCRIPT="$SCRIPT_DIR/ms-sso-openconnect.py"
 
 # Get the real user (even when running with sudo)
 REAL_USER="${SUDO_USER:-$USER}"
-REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    REAL_HOME=$(dscl . -read /Users/"$REAL_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+else
+    REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+fi
+# Fallback to $HOME if lookup failed
+REAL_HOME="${REAL_HOME:-$HOME}"
 
 # Use the real user's playwright cache
 export PLAYWRIGHT_BROWSERS_PATH="$REAL_HOME/.cache/ms-playwright"
@@ -20,19 +26,25 @@ if [ -n "$SUDO_USER" ]; then
     export DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u $REAL_USER)/bus"
 fi
 
-# Check if venv exists or needs updating
+# Prefer uv if available, fall back to pip
+if command -v uv &>/dev/null; then
+    PIP_INSTALL="uv pip install --python $VENV_DIR/bin/python"
+    VENV_CREATE="uv venv $VENV_DIR"
+else
+    PIP_INSTALL="$VENV_DIR/bin/pip install -q"
+    VENV_CREATE="python3 -m venv $VENV_DIR"
+fi
+
 if [ ! -d "$VENV_DIR" ]; then
     echo "Creating Python virtual environment..."
-    python3 -m venv "$VENV_DIR"
-    source "$VENV_DIR/bin/activate"
-    pip install playwright keyring pyotp secretstorage -q
-    playwright install chromium
-    deactivate
+    $VENV_CREATE
+    $PIP_INSTALL playwright keyring pyotp
+    [[ "$OSTYPE" == "linux"* ]] && $PIP_INSTALL secretstorage
+    "$VENV_DIR/bin/playwright" install chromium
 elif ! "$VENV_DIR/bin/python" -c "import keyring, pyotp" 2>/dev/null; then
     echo "Installing additional dependencies..."
-    source "$VENV_DIR/bin/activate"
-    pip install keyring pyotp secretstorage -q
-    deactivate
+    $PIP_INSTALL keyring pyotp
+    [[ "$OSTYPE" == "linux"* ]] && $PIP_INSTALL secretstorage
 fi
 
 # Run the Python script with venv
