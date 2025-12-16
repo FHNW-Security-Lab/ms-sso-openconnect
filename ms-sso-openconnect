@@ -47,5 +47,30 @@ elif ! "$VENV_DIR/bin/python" -c "import keyring, pyotp" 2>/dev/null; then
     [[ "$OSTYPE" == "linux"* ]] && $PIP_INSTALL secretstorage
 fi
 
+
+# Check for openconnect (only needed when connecting)
+needs_openconnect=true
+# Check for openconnect during setup
+for arg in "$@"; do
+    case "$arg" in
+        --setup|-s)
+            if ! command -v openconnect &>/dev/null; then
+                echo "Warning: openconnect is not installed."
+                if [[ "$OSTYPE" == "darwin"* ]]; then
+                    echo "Install with: brew install openconnect"
+                elif command -v apt &>/dev/null; then
+                    echo "Install with: sudo apt install openconnect"
+                elif command -v dnf &>/dev/null; then
+                    echo "Install with: sudo dnf install openconnect"
+                elif command -v pacman &>/dev/null; then
+                    echo "Install with: sudo pacman -S openconnect"
+                fi
+                echo ""
+            fi
+            break
+            ;;
+    esac
+done
+
 # Run the Python script with venv
 exec "$VENV_DIR/bin/python" "$PYTHON_SCRIPT" "$@"
