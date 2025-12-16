@@ -1,0 +1,108 @@
+version: 1
+
+script:
+  # Clean up previous build
+  - rm -rf AppDir || true
+  - mkdir -p AppDir/usr/bin
+  - mkdir -p AppDir/usr/lib/ms-sso-openconnect
+  - mkdir -p AppDir/usr/share/applications
+  - mkdir -p AppDir/usr/share/icons/hicolor/scalable/apps
+  - mkdir -p AppDir/usr/share/icons/hicolor/128x128/apps
+  - mkdir -p AppDir/usr/share/icons/hicolor/64x64/apps
+  - mkdir -p AppDir/usr/share/icons/hicolor/48x48/apps
+  - mkdir -p AppDir/usr/share/icons/hicolor/32x32/apps
+  - mkdir -p AppDir/usr/share/icons/hicolor/22x22/apps
+
+  # Create virtual environment and install dependencies
+  - python3 -m venv AppDir/usr/lib/python-venv
+  - AppDir/usr/lib/python-venv/bin/pip install --upgrade pip wheel
+  - AppDir/usr/lib/python-venv/bin/pip install PyQt6 keyring pyotp secretstorage
+
+  # Install the application package
+  - AppDir/usr/lib/python-venv/bin/pip install -e ../../
+
+  # Install playwright and browsers
+  - AppDir/usr/lib/python-venv/bin/pip install playwright
+  - PLAYWRIGHT_BROWSERS_PATH=AppDir/usr/lib/playwright AppDir/usr/lib/python-venv/bin/playwright install chromium
+
+  # Copy the CLI tool
+  - cp ../../../ms-sso-openconnect.py AppDir/usr/lib/ms-sso-openconnect/
+
+  # Copy desktop files and icons
+  - cp ../../desktop/ms-sso-openconnect-ui.desktop AppDir/usr/share/applications/
+  - cp ../../src/vpn_ui/resources/icons/app-icon.svg AppDir/usr/share/icons/hicolor/scalable/apps/ms-sso-openconnect-ui.svg
+
+  # Create launcher script
+  - |
+    cat > AppDir/usr/bin/ms-sso-openconnect-ui << 'LAUNCHER'
+    #!/bin/bash
+    HERE="$(dirname "$(readlink -f "${0}")")"
+    export PLAYWRIGHT_BROWSERS_PATH="${HERE}/../lib/playwright"
+    export QT_PLUGIN_PATH="${HERE}/../lib/python-venv/lib/python3.*/site-packages/PyQt6/Qt6/plugins"
+    export PATH="${HERE}:${PATH}"
+    exec "${HERE}/../lib/python-venv/bin/python" -m vpn_ui "$@"
+    LAUNCHER
+  - chmod +x AppDir/usr/bin/ms-sso-openconnect-ui
+
+AppDir:
+  path: ./AppDir
+
+  app_info:
+    id: com.github.ms-sso-openconnect-ui
+    name: MS SSO OpenConnect
+    icon: ms-sso-openconnect-ui
+    version: 1.0.0
+    exec: usr/bin/ms-sso-openconnect-ui
+    exec_args: "$@"
+
+  apt:
+    arch: amd64
+    sources:
+      - sourceline: deb http://archive.ubuntu.com/ubuntu jammy main universe
+    include:
+      - libxcb-cursor0
+      - libxkbcommon0
+      - libxcb-xinerama0
+      - libxcb-icccm4
+      - libxcb-image0
+      - libxcb-keysyms1
+      - libxcb-randr0
+      - libxcb-render-util0
+      - libxcb-shape0
+      - libsecret-1-0
+      - libglib2.0-0
+      - libnss3
+      - libnspr4
+      - libatk1.0-0
+      - libatk-bridge2.0-0
+      - libcups2
+      - libdrm2
+      - libdbus-1-3
+      - libxcomposite1
+      - libxdamage1
+      - libxfixes3
+      - libxrandr2
+      - libgbm1
+      - libpango-1.0-0
+      - libcairo2
+      - libasound2
+    exclude:
+      - humanity-icon-theme
+      - adwaita-icon-theme
+      - hicolor-icon-theme
+
+  runtime:
+    env:
+      APPDIR_LIBRARY_PATH: $APPDIR/usr/lib/x86_64-linux-gnu
+
+  test:
+    fedora-30:
+      image: appimagecrafters/tests-env:fedora-30
+      command: ./AppRun --help
+    ubuntu-xenial:
+      image: appimagecrafters/tests-env:ubuntu-xenial
+      command: ./AppRun --help
+
+AppImage:
+  arch: x86_64
+  update-information: guess

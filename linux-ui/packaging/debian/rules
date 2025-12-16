@@ -1,0 +1,23 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+export PYBUILD_NAME = ms-sso-openconnect-ui
+export DH_VIRTUALENV_INSTALL_ROOT = /opt/venvs
+
+%:
+	dh $@ --with python3 --buildsystem=pybuild
+
+override_dh_auto_test:
+	# Skip tests during package build (pytest not available)
+	@echo "Skipping tests during Debian package build"
+
+override_dh_auto_install:
+	dh_auto_install
+	# Install the CLI backend tool
+	install -D -m 755 ../ms-sso-openconnect.py debian/ms-sso-openconnect-ui/usr/lib/ms-sso-openconnect/ms-sso-openconnect.py
+	# Install desktop file
+	install -D -m 644 desktop/ms-sso-openconnect-ui.desktop debian/ms-sso-openconnect-ui/usr/share/applications/ms-sso-openconnect-ui.desktop
+	# Install icons
+	install -D -m 644 src/vpn_ui/resources/icons/app-icon.svg debian/ms-sso-openconnect-ui/usr/share/icons/hicolor/scalable/apps/ms-sso-openconnect-ui.svg
+	# Install polkit policy (allows sudo-group users to run openconnect with their password)
+	install -D -m 644 packaging/polkit/org.openconnect.policy debian/ms-sso-openconnect-ui/usr/share/polkit-1/actions/org.openconnect.policy

@@ -1,0 +1,26 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    purge|remove)
+        # Remove the venv and browsers installed by postinst
+        rm -rf /opt/ms-sso-openconnect-ui
+
+        # Remove wrapper script
+        rm -f /usr/local/bin/ms-sso-openconnect-playwright
+
+        # Update icon cache
+        if command -v gtk-update-icon-cache &> /dev/null; then
+            gtk-update-icon-cache -f /usr/share/icons/hicolor/ 2>/dev/null || true
+        fi
+
+        # Update desktop database
+        if command -v update-desktop-database &> /dev/null; then
+            update-desktop-database /usr/share/applications/ 2>/dev/null || true
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

@@ -1,0 +1,19 @@
+[Desktop Entry]
+Name=MS SSO OpenConnect
+GenericName=VPN Client
+Comment=Connect to VPN with Microsoft SSO authentication
+Exec=ms-sso-openconnect-ui
+Icon=ms-sso-openconnect-ui
+Terminal=false
+Type=Application
+Categories=Network;Security;
+Keywords=vpn;openconnect;microsoft;sso;globalprotect;anyconnect;
+StartupNotify=true
+StartupWMClass=ms-sso-openconnect-ui
+X-GNOME-Autostart-enabled=false
+X-GNOME-UsesNotifications=true
+Actions=Settings;
+
+[Desktop Action Settings]
+Name=Settings
+Exec=ms-sso-openconnect-ui --settings

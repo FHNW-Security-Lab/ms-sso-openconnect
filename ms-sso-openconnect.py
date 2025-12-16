@@ -1102,7 +1102,7 @@ def do_saml_auth(vpn_server, username, password, totp_secret_or_code, auto_totp=
 
 
 def connect_vpn(vpn_server, protocol, cookies, no_dtls=False, username=None, allow_fallback=False,
-                connection_name=None, cached_usergroup=None):
+                connection_name=None, cached_usergroup=None, use_pkexec=False):
     """Connect to VPN using openconnect with the obtained cookie.
 
     If allow_fallback=True, use subprocess so we can return on failure.
@@ -1111,6 +1111,7 @@ def connect_vpn(vpn_server, protocol, cookies, no_dtls=False, username=None, all
     Args:
         connection_name: Connection name for updating cookie cache
         cached_usergroup: Cached usergroup from previous connection (e.g., 'portal:portal-userauthcookie')
+        use_pkexec: Use pkexec instead of sudo (for GUI without terminal)
     """
 
     print(f"\n{GREEN}Connecting to VPN...{NC}\n")
@@ -1249,12 +1250,17 @@ def connect_vpn(vpn_server, protocol, cookies, no_dtls=False, username=None, all
         print(f"    echo {shlex.quote(cookie_str)} | sudo {cmd_quoted}")
         print()
 
-        # IMPORTANT: Cache sudo credentials BEFORE redirecting stdin
-        # Otherwise sudo will try to read password from the cookie file!
-        print(f"    [DEBUG] Caching sudo credentials (required before stdin redirect)...")
-        subprocess.run(["sudo", "-v"], check=True)
-
-        sudo_cmd = ["sudo"] + cmd
+        # Determine privilege escalation command
+        if use_pkexec:
+            # pkexec for GUI mode - no need to cache credentials, polkit handles it
+            priv_cmd = ["pkexec"] + cmd
+            print(f"    [DEBUG] Using pkexec for privilege escalation (GUI mode)...")
+        else:
+            # IMPORTANT: Cache sudo credentials BEFORE redirecting stdin
+            # Otherwise sudo will try to read password from the cookie file!
+            print(f"    [DEBUG] Caching sudo credentials (required before stdin redirect)...")
+            subprocess.run(["sudo", "-v"], check=True)
+            priv_cmd = ["sudo"] + cmd
 
         # Use subprocess with os.pipe() for stdin and stdout capture
         # This allows us to:
@@ -1271,7 +1277,7 @@ def connect_vpn(vpn_server, protocol, cookies, no_dtls=False, username=None, all
 
         # Run openconnect with stdin from pipe and stdout captured
         process = subprocess.Popen(
-            sudo_cmd,
+            priv_cmd,
             stdin=read_fd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,  # Combine stderr with stdout
@@ -1308,9 +1314,12 @@ def connect_vpn(vpn_server, protocol, cookies, no_dtls=False, username=None, all
             new_cookies = {'portal-userauthcookie': portal_cookie}
             store_cookies(connection_name, new_cookies, usergroup='portal:portal-userauthcookie')
     else:
-        # Use sudo for openconnect since we're running as normal user
-        sudo_cmd = ["sudo"] + cmd
-        process = subprocess.Popen(sudo_cmd)
+        # Use sudo/pkexec for openconnect since we're running as normal user
+        if use_pkexec:
+            priv_cmd = ["pkexec"] + cmd
+        else:
+            priv_cmd = ["sudo"] + cmd
+        process = subprocess.Popen(priv_cmd)
         returncode = process.wait()
 
     if returncode != 0:

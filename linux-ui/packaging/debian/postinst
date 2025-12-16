@@ -1,0 +1,50 @@
+#!/bin/bash
+set -e
+
+VENV_DIR="/opt/ms-sso-openconnect-ui/venv"
+PLAYWRIGHT_BROWSERS="/opt/ms-sso-openconnect-ui/browsers"
+
+case "$1" in
+    configure)
+        echo "Setting up MS SSO OpenConnect UI..."
+
+        # Create virtual environment for playwright
+        echo "Creating Python virtual environment..."
+        mkdir -p /opt/ms-sso-openconnect-ui
+        python3 -m venv "$VENV_DIR"
+
+        # Install playwright in the venv
+        echo "Installing Playwright..."
+        "$VENV_DIR/bin/pip" install --quiet playwright pyotp
+
+        # Install Chromium browser
+        echo "Installing Chromium browser for SSO authentication..."
+        PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_BROWSERS" "$VENV_DIR/bin/playwright" install chromium
+
+        # Create wrapper script that uses the venv's playwright
+        cat > /usr/local/bin/ms-sso-openconnect-playwright << 'WRAPPER'
+#!/bin/bash
+export PLAYWRIGHT_BROWSERS_PATH="/opt/ms-sso-openconnect-ui/browsers"
+exec /opt/ms-sso-openconnect-ui/venv/bin/python "$@"
+WRAPPER
+        chmod +x /usr/local/bin/ms-sso-openconnect-playwright
+
+        # Update icon cache
+        if command -v gtk-update-icon-cache &> /dev/null; then
+            gtk-update-icon-cache -f /usr/share/icons/hicolor/ 2>/dev/null || true
+        fi
+
+        # Update desktop database
+        if command -v update-desktop-database &> /dev/null; then
+            update-desktop-database /usr/share/applications/ 2>/dev/null || true
+        fi
+
+        echo ""
+        echo "MS SSO OpenConnect UI installed successfully!"
+        echo ""
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0
