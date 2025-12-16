@@ -4,7 +4,9 @@ from typing import Optional
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QDialog,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -12,10 +14,12 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSplitter,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from vpn_ui.autostart import is_autostart_enabled, set_autostart
 from vpn_ui.connection_form import ConnectionForm
 from vpn_ui.constants import APP_NAME, PROTOCOLS
 from vpn_ui.vpn_backend import VPNBackend
@@ -46,7 +50,28 @@ class SettingsDialog(QDialog):
 
     def _setup_ui(self) -> None:
         """Set up the dialog UI."""
-        layout = QHBoxLayout(self)
+        layout = QVBoxLayout(self)
+
+        # Create tab widget
+        self.tab_widget = QTabWidget()
+        layout.addWidget(self.tab_widget)
+
+        # Tab 1: Connections
+        connections_tab = self._create_connections_tab()
+        self.tab_widget.addTab(connections_tab, "Connections")
+
+        # Tab 2: Application Settings
+        app_settings_tab = self._create_app_settings_tab()
+        self.tab_widget.addTab(app_settings_tab, "Application")
+
+    def _create_connections_tab(self) -> QWidget:
+        """Create the connections management tab.
+
+        Returns:
+            Widget containing connections UI
+        """
+        tab = QWidget()
+        layout = QHBoxLayout(tab)
 
         # Create splitter for resizable panels
         splitter = QSplitter()
@@ -99,6 +124,68 @@ class SettingsDialog(QDialog):
         splitter.setSizes([250, 500])
 
         layout.addWidget(splitter)
+
+        return tab
+
+    def _create_app_settings_tab(self) -> QWidget:
+        """Create the application settings tab.
+
+        Returns:
+            Widget containing application settings
+        """
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        # Startup settings group
+        startup_group = QGroupBox("Startup")
+        startup_layout = QVBoxLayout(startup_group)
+
+        self.autostart_checkbox = QCheckBox("Start automatically when you log in")
+        self.autostart_checkbox.setToolTip(
+            "Launch the application automatically when you log into your desktop.\n"
+            "The VPN will NOT connect automatically - only the tray icon will appear."
+        )
+        self.autostart_checkbox.setChecked(is_autostart_enabled())
+        self.autostart_checkbox.stateChanged.connect(self._on_autostart_changed)
+        startup_layout.addWidget(self.autostart_checkbox)
+
+        # Add note about behavior
+        note_label = QLabel(
+            "<i>Note: Only the application starts automatically. "
+            "VPN connection must be initiated manually from the tray menu.</i>"
+        )
+        note_label.setWordWrap(True)
+        note_label.setStyleSheet("color: gray; font-size: 11px;")
+        startup_layout.addWidget(note_label)
+
+        layout.addWidget(startup_group)
+
+        # Add stretch to push everything to the top
+        layout.addStretch()
+
+        return tab
+
+    def _on_autostart_changed(self, state: int) -> None:
+        """Handle autostart checkbox state change.
+
+        Args:
+            state: Checkbox state (0=unchecked, 2=checked)
+        """
+        enabled = state == 2  # Qt.CheckState.Checked
+        success = set_autostart(enabled)
+
+        if not success:
+            # Revert the checkbox if operation failed
+            self.autostart_checkbox.blockSignals(True)
+            self.autostart_checkbox.setChecked(not enabled)
+            self.autostart_checkbox.blockSignals(False)
+
+            QMessageBox.warning(
+                self,
+                "Error",
+                f"Failed to {'enable' if enabled else 'disable'} autostart.\n\n"
+                "Please check file permissions for ~/.config/autostart/"
+            )
 
     def _load_connections(self) -> None:
         """Load connections into the list."""

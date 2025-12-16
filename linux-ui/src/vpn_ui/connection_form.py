@@ -83,10 +83,21 @@ class ConnectionForm(QWidget):
         layout.removeRow(4)  # Remove the password row we just added
         layout.insertRow(4, "Password:", password_layout)
 
-        # TOTP secret
+        # TOTP secret (hidden by default like password)
         self.totp_edit = QLineEdit()
+        self.totp_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.totp_edit.setPlaceholderText("Base32 TOTP secret (from authenticator app setup)")
-        layout.addRow("TOTP Secret:", self.totp_edit)
+
+        # Show/hide TOTP button
+        self._totp_visible = False
+        self.toggle_totp_btn = QPushButton("Show")
+        self.toggle_totp_btn.setFixedWidth(60)
+        self.toggle_totp_btn.clicked.connect(self._toggle_totp_visibility)
+
+        totp_layout = QHBoxLayout()
+        totp_layout.addWidget(self.totp_edit)
+        totp_layout.addWidget(self.toggle_totp_btn)
+        layout.addRow("TOTP Secret:", totp_layout)
 
         # TOTP test section
         test_layout = QHBoxLayout()
@@ -118,6 +129,16 @@ class ConnectionForm(QWidget):
         else:
             self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
             self.toggle_password_btn.setText("Show")
+
+    def _toggle_totp_visibility(self) -> None:
+        """Toggle TOTP secret field visibility."""
+        self._totp_visible = not self._totp_visible
+        if self._totp_visible:
+            self.totp_edit.setEchoMode(QLineEdit.EchoMode.Normal)
+            self.toggle_totp_btn.setText("Hide")
+        else:
+            self.totp_edit.setEchoMode(QLineEdit.EchoMode.Password)
+            self.toggle_totp_btn.setText("Show")
 
     def load_connection(self, name: str, conn: dict) -> None:
         """Load a connection into the form for editing.

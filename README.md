@@ -8,7 +8,7 @@ A command-line tool to connect to VPNs protected by Microsoft SSO authentication
 - **Multiple Credentials per Server**: Same server can have different credentials under different names
 - **Multi-Protocol Support**: Supports both Cisco AnyConnect and GlobalProtect protocols
 - **Headless Browser Authentication**: Uses Playwright to automate Microsoft SSO login
-- **Secure Credential Storage**: Stores credentials in GNOME Keyring
+- **Secure Credential Storage**: Stores credentials in system keychain (GNOME Keyring on Linux, Apple Keychain on macOS)
 - **Automatic TOTP Generation**: Generates 2FA codes from stored secret
 - **Session Cookie Caching**: Caches session cookies per connection for fast reconnection
 - **Auto Re-authentication**: Automatically re-authenticates when cookies expire
@@ -18,7 +18,9 @@ A command-line tool to connect to VPNs protected by Microsoft SSO authentication
 
 - Python 3.8+
 - OpenConnect
-- GNOME Keyring (for credential storage)
+- System keychain:
+  - **Linux**: GNOME Keyring or KWallet
+  - **macOS**: Apple Keychain (built-in)
 
 ## Installation
 
@@ -40,7 +42,7 @@ chmod +x ms-sso-openconnect
 
 ### Initial Setup
 
-Add a VPN connection (credentials stored securely in GNOME Keyring):
+Add a VPN connection (credentials stored securely in system keychain):
 
 ```bash
 ./ms-sso-openconnect --setup
@@ -159,7 +161,7 @@ On first connection, it authenticates via headless browser. Subsequent connectio
    - Using `-d` to disconnect keeps the session alive on the server
 
 3. **Credential Storage**:
-   - All credentials stored in GNOME Keyring (encrypted)
+   - All credentials stored in system keychain (GNOME Keyring/KWallet on Linux, Apple Keychain on macOS)
    - Multiple connections supported (identified by name)
    - Same server can have multiple credential sets
    - TOTP secret used to generate fresh codes when needed
@@ -177,11 +179,12 @@ The wrapper script automatically installs Chromium. If it fails, run:
 ```
 
 ### Keyring access issues
-Make sure GNOME Keyring is running and unlocked:
+Make sure your system keychain is available:
 ```bash
-# Check if keyring is available
+# Check which keyring backend is being used
 python3 -c "import keyring; print(keyring.get_keyring())"
 ```
+On Linux, ensure GNOME Keyring or KWallet is running and unlocked. On macOS, Apple Keychain should work automatically.
 
 ### Authentication timeout
 Use `--visible` to watch the browser and identify where it gets stuck:
@@ -213,7 +216,7 @@ Some firewalls block DTLS (UDP). Use TCP-only mode:
 
 ## Security Notes
 
-- Credentials are stored in GNOME Keyring (encrypted at rest)
+- Credentials are stored in system keychain (encrypted at rest)
 - Cookie cache files have 600 permissions (owner read/write only)
 - TOTP secrets should be kept secure - treat them like passwords
 - The browser runs headless by default for security

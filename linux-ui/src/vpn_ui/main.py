@@ -96,8 +96,15 @@ class VPNApplication:
                 self._current_connection = active_conn
                 self.tray.set_status(STATUS_CONNECTED, active_conn)
             else:
-                # Connected externally (via CLI), can't know the name
-                self.tray.set_status(STATUS_CONNECTED, "Unknown")
+                # Try to infer from openconnect process arguments
+                inferred = self.backend.infer_connection_name()
+                if inferred:
+                    self._current_connection = inferred
+                    self.backend.save_active_connection(inferred)
+                    self.tray.set_status(STATUS_CONNECTED, inferred)
+                else:
+                    # Connected externally (via CLI), can't determine the name
+                    self.tray.set_status(STATUS_CONNECTED, "Unknown")
         else:
             # Not connected - clear any stale state
             self.backend.clear_active_connection()

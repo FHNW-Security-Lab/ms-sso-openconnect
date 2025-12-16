@@ -394,6 +394,68 @@ class VPNBackend:
 
         return {"connected": True}
 
+    def infer_connection_name(self) -> Optional[str]:
+        """Try to infer connection name from running openconnect process.
+
+        This is useful when the app starts and finds openconnect already
+        running (e.g., connected via CLI or app restart).
+
+        Returns:
+            Connection name if it can be inferred, None otherwise
+        """
+        if not self.is_connected():
+            return None
+
+        try:
+            # Get the openconnect process command line
+            result = subprocess.run(
+                ["pgrep", "-a", "openconnect"],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                return None
+
+            cmd_line = result.stdout.strip()
+
+            # Extract server address from command line
+            # openconnect typically has the server as an argument
+            # Format: "PID openconnect [options] server"
+            parts = cmd_line.split()
+            if len(parts) < 2:
+                return None
+
+            # The server is usually the last argument or after --server=
+            server_address = None
+            for i, part in enumerate(parts):
+                if part.startswith("--server="):
+                    server_address = part.split("=", 1)[1]
+                    break
+                # Check if it looks like a hostname (not an option)
+                if not part.startswith("-") and "." in part and part != "openconnect":
+                    # Skip the PID (first element) and command name
+                    server_address = part
+
+            if not server_address:
+                return None
+
+            # Match against saved connections
+            connections = self.get_connections()
+            for name, details in connections.items():
+                conn_address = details.get("address", "")
+                # Match by server address (could be exact or partial match)
+                if conn_address and (
+                    conn_address == server_address or
+                    conn_address in server_address or
+                    server_address in conn_address
+                ):
+                    return name
+
+        except Exception:
+            pass
+
+        return None
+
     def get_config(self, name: str) -> Optional[tuple]:
         """Get full configuration for a connection.
 

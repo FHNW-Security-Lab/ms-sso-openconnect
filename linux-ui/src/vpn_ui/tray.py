@@ -230,12 +230,22 @@ class VPNTrayIcon(QObject):
         if is_connected:
             if self._current_status != STATUS_CONNECTED:
                 # VPN connected - try to get connection name from state
+                conn_name = "Unknown"
                 try:
                     backend = get_backend()
+                    # First try the state file
                     active_conn = backend.get_active_connection()
-                    conn_name = active_conn if active_conn else "Unknown"
+                    if active_conn:
+                        conn_name = active_conn
+                    else:
+                        # Try to infer from openconnect process arguments
+                        inferred = backend.infer_connection_name()
+                        if inferred:
+                            conn_name = inferred
+                            # Save it to state so we don't have to infer again
+                            backend.save_active_connection(inferred)
                 except Exception:
-                    conn_name = "Unknown"
+                    pass
                 self.set_status(STATUS_CONNECTED, conn_name)
         else:
             if self._current_status != STATUS_DISCONNECTED:
