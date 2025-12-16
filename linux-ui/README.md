@@ -6,7 +6,7 @@ A graphical user interface for the `ms-sso-openconnect` VPN client tool, support
 
 - **System Tray Icon**: Real-time connection status indicator
 - **Multiple Connections**: Manage multiple VPN profiles
-- **Secure Storage**: Credentials stored in GNOME Keyring
+- **Secure Storage**: Credentials stored in system keychain
 - **Session Caching**: Fast reconnection with cached cookies
 - **Desktop Notifications**: Connect/disconnect/error notifications
 - **Cross-Desktop**: Works on GNOME, KDE, XFCE, and other DEs
@@ -44,18 +44,18 @@ sudo apt install devscripts debhelper dh-python python3-all pybuild-plugin-pypro
 
 ### Build Dependencies (AppImage)
 
-Install these before running `./scripts/build-appimage.sh`:
+The AppImage build script (`./scripts/build-appimage.sh`) is self-contained and only requires:
 
 ```bash
-pip install appimage-builder
-sudo apt install patchelf desktop-file-utils
+# Required
+sudo apt install python3 python3-venv curl
 ```
 
-| Package | Description |
-|---------|-------------|
-| `appimage-builder` | AppImage creation tool (pip) |
-| `patchelf` | ELF binary patching |
-| `desktop-file-utils` | Desktop file validation |
+The script automatically:
+- Creates a Python virtual environment with all dependencies
+- Downloads and installs Playwright with Chromium
+- Downloads `appimagetool` if not present
+- Packages everything into a portable AppImage
 
 ### Python Dependencies
 
@@ -154,7 +154,6 @@ linux-ui/
 │   ├── vpn_backend.py       # Backend interface
 │   └── notifications.py     # Desktop notifications
 ├── packaging/
-│   ├── appimage/            # AppImage config
 │   └── debian/              # Debian packaging
 ├── desktop/                 # Desktop integration files
 └── scripts/                 # Build scripts

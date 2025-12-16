@@ -1,10 +1,12 @@
 # Virtual environment
 venv/
+.venv/
 
 # Python cache
 __pycache__/
 *.py[cod]
 *$py.class
+*.egg-info/
 
 # Debug screenshots
 /tmp/vpn-*.png
@@ -17,3 +19,9 @@ reports/
 .vscode/
 *.swp
 *.swo
+
+# Build artifacts
+linux-ui/build/
+linux-ui/dist/
+*.AppImage
+appimagetool*

@@ -26,7 +26,7 @@ A command-line tool to connect to VPNs protected by Microsoft SSO authentication
 
 ```bash
 # Clone the repository
-git clone https://github.com/FHNW-Security-Lab/ms-sso-openconnect.git
+git clone https://github.com/yourusername/ms-sso-openconnect.git
 cd ms-sso-openconnect
 
 # Make executable
@@ -49,7 +49,7 @@ Add a VPN connection (credentials stored securely in system keychain):
 ```
 
 You'll be prompted for:
-- **Connection Name** (e.g., `work`, `fhnw`, `client-vpn`)
+- **Connection Name** (e.g., `work`, `office`, `client-vpn`)
 - **VPN Server Address** (e.g., `vpn.example.com`)
 - **Protocol** (Cisco AnyConnect or GlobalProtect)
 - **Microsoft account email**
@@ -64,7 +64,7 @@ You'll be prompted for:
 
 # Connect by name
 ./ms-sso-openconnect work
-./ms-sso-openconnect fhnw
+./ms-sso-openconnect office
 
 # If multiple connections exist, you'll be prompted to select one
 ```

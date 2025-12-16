@@ -269,7 +269,7 @@ def setup_config(edit_name=None):
         print(f"Editing: {name}")
         existing = connections.get(name, {})
     else:
-        name = input("Connection Name (e.g., work, fhnw, client-vpn): ").strip()
+        name = input("Connection Name (e.g., work, office, client-vpn): ").strip()
         if not name:
             print(f"{RED}Error: Connection name cannot be empty{NC}")
             return False
@@ -704,10 +704,10 @@ def do_saml_auth(vpn_server, username, password, totp_secret_or_code, auto_totp=
             # Track URL to detect redirects
             initial_url = page.url
 
-            # Quick check first (for fast cases like FHNW)
+            # Quick check first (for fast login cases)
             password_field = find_password_field()
 
-            # If not found immediately, wait for redirect/page load (federated login like unibas)
+            # If not found immediately, wait for redirect/page load (federated login)
             if not password_field:
                 print("    -> Waiting for login page...")
 
@@ -787,7 +787,7 @@ def do_saml_auth(vpn_server, username, password, totp_secret_or_code, auto_totp=
             # Order matters: check org-specific first, then generic
             clicked = False
             submit_selectors = [
-                # ADFS-specific (login.unibas.ch style)
+                # ADFS-specific
                 '#submitButton',          # ADFS submit button ID
                 'span#submitButton',      # ADFS span with ID
                 'span.submit.modifiedSignIn',  # ADFS submit class
@@ -879,14 +879,14 @@ def do_saml_auth(vpn_server, username, password, totp_secret_or_code, auto_totp=
 
             otp_entered = False
 
-            # === PATH 1: Direct OTP input (e.g., FHNW) ===
+            # === PATH 1: Direct OTP input ===
             otp_input = find_otp_input()
             if otp_input:
                 print("    -> Found direct TOTP input field")
                 enter_otp_code(otp_input)
                 otp_entered = True
 
-            # === PATH 2: Menu navigation required (e.g., unibas) ===
+            # === PATH 2: Menu navigation required (federated 2FA) ===
             if not otp_entered:
                 print("    -> Looking for 2FA method selection menu...")
 
