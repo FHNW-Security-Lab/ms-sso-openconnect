@@ -56,6 +56,7 @@ struct _MsSsoEditorPrivate {
 
     NMConnection *connection;
     gboolean changed;
+    gboolean constructed;  /* TRUE after construction is complete */
 };
 
 static void ms_sso_editor_interface_init(NMVpnEditorInterface *iface);
@@ -164,6 +165,28 @@ static void
 stuff_changed_cb(GtkWidget *widget, gpointer user_data)
 {
     MsSsoEditor *self = MS_SSO_EDITOR(user_data);
+
+    /* Don't emit signals during construction */
+    if (!self->priv->constructed)
+        return;
+
+    self->priv->changed = TRUE;
+    g_signal_emit_by_name(self, "changed");
+}
+
+/*
+ * Callback for GObject notify signals (e.g., GtkDropDown "notify::selected")
+ * Note: notify signals pass (object, pspec, user_data) not (widget, user_data)
+ */
+static void
+dropdown_changed_cb(GObject *object, GParamSpec *pspec, gpointer user_data)
+{
+    MsSsoEditor *self = MS_SSO_EDITOR(user_data);
+
+    /* Don't emit signals during construction */
+    if (!self->priv->constructed)
+        return;
+
     self->priv->changed = TRUE;
     g_signal_emit_by_name(self, "changed");
 }
@@ -300,7 +323,7 @@ create_editor_widget(MsSsoEditor *self)
 
     priv->protocol = GTK_DROP_DOWN(gtk_drop_down_new(G_LIST_MODEL(priv->protocol_model), NULL));
     gtk_widget_set_hexpand(GTK_WIDGET(priv->protocol), TRUE);
-    g_signal_connect(priv->protocol, "notify::selected", G_CALLBACK(stuff_changed_cb), self);
+    g_signal_connect(priv->protocol, "notify::selected", G_CALLBACK(dropdown_changed_cb), self);
     gtk_grid_attach(GTK_GRID(grid), GTK_WIDGET(priv->protocol), 1, row, 1, 1);
     row++;
 
@@ -487,6 +510,9 @@ constructed(GObject *object)
     /* Load connection if provided */
     if (self->priv->connection)
         load_connection(self, self->priv->connection);
+
+    /* Mark construction as complete - signals can now be emitted */
+    self->priv->constructed = TRUE;
 }
 
 static void
