@@ -1,8 +1,30 @@
 # MS SSO OpenConnect
 
-A command-line tool to connect to VPNs protected by Microsoft SSO authentication using OpenConnect.
+A tool to connect to VPNs protected by Microsoft SSO authentication using OpenConnect. Available as both a command-line tool and a GNOME NetworkManager plugin.
 
-## Features
+## Installation Options
+
+### Option 1: GNOME NetworkManager Plugin (Recommended for Desktop)
+
+The NetworkManager plugin integrates with GNOME Settings, allowing you to manage MS SSO VPN connections like any other VPN.
+
+```bash
+cd nm-plugin
+./build-deb.sh
+sudo dpkg -i dist/network-manager-ms-sso_*.deb
+```
+
+After installation:
+1. Open **Settings → Network → VPN**
+2. Click **+** to add a new VPN
+3. Select **MS SSO OpenConnect**
+4. Enter your VPN server and credentials
+
+### Option 2: Command-Line Tool
+
+For headless servers or users who prefer the terminal.
+
+## Features (Command-Line)
 
 - **Named Connections**: Store multiple VPN configurations identified by custom names
 - **Multiple Credentials per Server**: Same server can have different credentials under different names
@@ -16,17 +38,24 @@ A command-line tool to connect to VPNs protected by Microsoft SSO authentication
 
 ## Requirements
 
+### NetworkManager Plugin
+- Ubuntu/Debian-based Linux with GNOME
+- NetworkManager
+- Python 3.8+ with pip
+- Dependencies installed automatically: playwright, keyring, pyotp
+
+### Command-Line Tool
 - Python 3.8+
 - OpenConnect
 - System keychain:
   - **Linux**: GNOME Keyring or KWallet
   - **macOS**: Apple Keychain (built-in)
 
-## Installation
+## Command-Line Installation
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/ms-sso-openconnect.git
+git clone https://github.com/FHNW-Security-Lab/ms-sso-openconnect.git
 cd ms-sso-openconnect
 
 # Make executable
@@ -210,9 +239,16 @@ Some firewalls block DTLS (UDP). Use TCP-only mode:
 
 ## Files
 
+### Command-Line Tool
 - `ms-sso-openconnect` - Bash wrapper (sets up venv, handles sudo)
 - `ms-sso-openconnect.py` - Main Python script
 - `~/.cache/ms-sso-openconnect/session_<name>.json` - Cached session cookies (per connection)
+
+### NetworkManager Plugin
+- `nm-plugin/` - GNOME NetworkManager VPN plugin
+- `nm-plugin/build-deb.sh` - Build script for Debian package
+- `nm-plugin/src/nm-ms-sso-service.py` - VPN D-Bus service
+- `nm-plugin/src/editor/` - GTK4 connection editor for GNOME Settings
 
 ## Security Notes
 
