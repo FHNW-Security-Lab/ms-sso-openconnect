@@ -1,0 +1,9 @@
+network-manager-ms-sso (1.0.0-1) unstable; urgency=medium
+
+  * Initial release.
+  * NetworkManager VPN plugin for MS SSO OpenConnect
+  * GTK4 editor for GNOME Settings integration
+  * Python D-Bus service for VPN connection handling
+  * Auth dialog with keyring integration
+
+ -- MS SSO OpenConnect Maintainers <maintainers@example.com>  Mon, 01 Jan 2024 00:00:00 +0000

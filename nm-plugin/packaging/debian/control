@@ -1,0 +1,41 @@
+Source: network-manager-ms-sso
+Section: net
+Priority: optional
+Maintainer: MS SSO OpenConnect Maintainers <maintainers@example.com>
+Build-Depends: debhelper-compat (= 13),
+               meson (>= 0.53.0),
+               pkg-config,
+               libnm-dev (>= 1.2.0),
+               libgtk-4-dev (>= 4.0),
+               libglib2.0-dev (>= 2.50),
+               libsecret-1-dev (>= 0.18)
+Standards-Version: 4.6.0
+Homepage: https://github.com/example/ms-sso-openconnect
+
+Package: network-manager-ms-sso
+Architecture: any
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         network-manager (>= 1.2.0),
+         openconnect,
+         python3,
+         python3-pip,
+         python3-gi,
+         python3-pyotp,
+         python3-dbus,
+         gir1.2-nm-1.0,
+         gir1.2-gtk-4.0,
+         gir1.2-adw-1,
+         gir1.2-secret-1
+Recommends: gnome-control-center
+Description: NetworkManager VPN plugin for MS SSO OpenConnect
+ This package provides a NetworkManager VPN plugin for connecting
+ to VPN servers using Microsoft SSO authentication.
+ .
+ It integrates with GNOME Settings to allow configuring VPN
+ connections with gateway, protocol, username, password, and
+ TOTP secret.
+ .
+ Supported protocols:
+  - Cisco AnyConnect
+  - GlobalProtect
