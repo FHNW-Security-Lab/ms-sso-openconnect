@@ -239,34 +239,70 @@ class VPNPluginService(dbus.service.Object):
             # Store gateway for config emission
             self.current_gateway = gateway
 
-            # Try cached cookies first
+            # Connection name for cookie cache
             connection_name = f"nm-{gateway}"
-            cached = self.vpn_core.get_stored_cookies(connection_name, max_age_hours=12)
 
-            cookies = None
-            cached_usergroup = None
+            # Try connection with retry on cookie rejection
+            max_attempts = 2
+            for attempt in range(max_attempts):
+                # Try cached cookies first (only on first attempt)
+                cookies = None
+                used_cache = False
 
-            if cached:
-                cookies, cached_usergroup = cached[0], cached[1] if len(cached) > 1 else None
-                print(f"[nm-ms-sso] Using cached cookies")
-            else:
-                # Perform SAML authentication
-                print(f"[nm-ms-sso] Performing SAML authentication...")
-                cookies = self.vpn_core.do_saml_auth(
-                    vpn_server=gateway,
-                    username=username,
-                    password=password,
-                    totp_secret_or_code=totp_secret,
-                    auto_totp=True,
-                    headless=True,
-                    debug=False
-                )
+                if attempt == 0:
+                    cached = self.vpn_core.get_stored_cookies(connection_name, max_age_hours=12)
+                    if cached:
+                        cookies, _ = cached[0], cached[1] if len(cached) > 1 else None
+                        used_cache = True
+                        print(f"[nm-ms-sso] Trying cached cookies...")
 
+                # If no cached cookies or this is a retry, authenticate
                 if not cookies:
-                    raise Exception("SAML authentication failed")
+                    print(f"[nm-ms-sso] Performing SAML authentication...")
+                    cookies = self.vpn_core.do_saml_auth(
+                        vpn_server=gateway,
+                        username=username,
+                        password=password,
+                        totp_secret_or_code=totp_secret,
+                        auto_totp=True,
+                        headless=True,
+                        debug=False
+                    )
 
-                # Cache cookies
-                self.vpn_core.store_cookies(connection_name, cookies, usergroup='portal:prelogin-cookie')
+                    if not cookies:
+                        raise Exception("SAML authentication failed")
+
+                    # Store fresh cookies
+                    self.vpn_core.store_cookies(connection_name, cookies, usergroup='portal:prelogin-cookie')
+                    print(f"[nm-ms-sso] Cookies stored for future connections")
+
+                # Try to connect with these cookies
+                success, error_msg = self._attempt_vpn_connection(gateway, protocol, cookies)
+
+                if success:
+                    break  # Connection successful
+                elif used_cache and attempt < max_attempts - 1:
+                    # Cookie was rejected, clear cache and retry with fresh auth
+                    print(f"[nm-ms-sso] Cookie rejected, clearing cache and re-authenticating...")
+                    self.vpn_core.clear_stored_cookies(connection_name)
+                    continue
+                else:
+                    raise Exception(error_msg or "VPN connection failed")
+
+        except Exception as e:
+            error_msg = str(e)
+            print(f"[nm-ms-sso] Connection error: {error_msg}")
+            import traceback
+            traceback.print_exc()
+            GLib.idle_add(lambda msg=error_msg: self._emit_failure(msg))
+
+    def _attempt_vpn_connection(self, gateway, protocol, cookies):
+        """Attempt to establish VPN connection with given cookies.
+
+        Returns:
+            Tuple of (success: bool, error_message: str or None)
+        """
+        try:
 
             # Connect to VPN
             # We use subprocess so we can monitor and return control
@@ -378,7 +414,10 @@ class VPNPluginService(dbus.service.Object):
                 time.sleep(0.5)
 
             if not connected:
-                raise Exception("VPN connection timeout")
+                # Check if it's a cookie rejection
+                if 'cookie' in output_buffer.lower() and ('reject' in output_buffer.lower() or 'invalid' in output_buffer.lower() or 'fail' in output_buffer.lower()):
+                    return (False, "Cookie rejected by server")
+                return (False, "VPN connection timeout")
 
             # Give vpnc-script a moment to configure DNS
             time.sleep(1)
@@ -394,12 +433,15 @@ class VPNPluginService(dbus.service.Object):
             # Connection ended
             GLib.idle_add(self._emit_disconnected)
 
+            return (True, None)
+
         except Exception as e:
             error_msg = str(e)
-            print(f"[nm-ms-sso] Connection error: {error_msg}")
-            import traceback
-            traceback.print_exc()
-            GLib.idle_add(lambda msg=error_msg: self._emit_failure(msg))
+            print(f"[nm-ms-sso] Attempt error: {error_msg}")
+            # Check if it's a cookie rejection error
+            if 'cookie' in error_msg.lower() and ('reject' in error_msg.lower() or 'invalid' in error_msg.lower()):
+                return (False, "Cookie rejected by server")
+            return (False, error_msg)
 
     def _emit_initial_config(self):
         """Emit initial Config signal before interface is created (called from main thread).
