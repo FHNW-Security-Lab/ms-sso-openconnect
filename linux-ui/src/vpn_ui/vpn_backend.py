@@ -9,6 +9,7 @@ import json
 import os
 import subprocess
 import sys
+import platform
 from pathlib import Path
 from typing import Any, Optional
 
@@ -61,12 +62,22 @@ class VPNBackend:
         script_path = project_root / "ms-sso-openconnect.py"
 
         if not script_path.exists():
-            # Try alternative locations
-            alt_paths = [
-                Path("/usr/share/ms-sso-openconnect/ms-sso-openconnect.py"),
-                Path("/usr/lib/ms-sso-openconnect/ms-sso-openconnect.py"),
-                Path.home() / ".local/share/ms-sso-openconnect/ms-sso-openconnect.py",
-            ]
+            # Platform-specific paths
+            if sys.platform == "darwin":
+                alt_paths = [
+                    # Bundled in .app
+                    Path(__file__).parent.parent / "ms-sso-openconnect.py",
+                    # Installed to Applications
+                    Path("/Applications/MS SSO OpenConnect.app/Contents/Resources/ms-sso-openconnect.py"),
+                    # User Application Support
+                    Path.home() / "Library/Application Support/ms-sso-openconnect/ms-sso-openconnect.py",
+                ]
+            else:
+                alt_paths = [
+                    Path("/usr/share/ms-sso-openconnect/ms-sso-openconnect.py"),
+                    Path("/usr/lib/ms-sso-openconnect/ms-sso-openconnect.py"),
+                    Path.home() / ".local/share/ms-sso-openconnect/ms-sso-openconnect.py",
+                ]
             for alt_path in alt_paths:
                 if alt_path.exists():
                     script_path = alt_path
@@ -274,33 +285,32 @@ class VPNBackend:
         )
 
     def disconnect(self, force: bool = False) -> bool:
-        """Disconnect from VPN.
-
-        Args:
-            force: If True, send SIGTERM (terminate session).
-                   If False, send SIGKILL (keep session alive).
-
-        Returns:
-            True if disconnect signal sent
-        """
         try:
-            # Use pkexec for GUI (polkit) instead of sudo which needs a terminal
-            # IMPORTANT: Use -x for exact process name match, NOT -f which matches paths
-            # -f would kill our app too since it runs from a path containing "openconnect"
-            signal_flag = "-TERM" if force else "-KILL"
-            result = subprocess.run(
-                ["pkexec", "pkill", signal_flag, "-x", "openconnect"],
-                capture_output=True
-            )
-            if result.returncode == 0:
-                if force:
-                    self.clear_stored_cookies()
-                return True
-            # Try with sudo as fallback (might work if running from terminal)
-            result = subprocess.run(
-                ["sudo", "-n", "pkill", signal_flag, "-x", "openconnect"],
-                capture_output=True
-            )
+            signal_flag = "-TERM"
+            if sys.platform == "darwin":
+                # macOS: use sudo with osascript for GUI prompt
+                result = subprocess.run(
+                    ["sudo", "-n", "pkill", signal_flag, "-x", "openconnect"],
+                    capture_output=True
+                )
+                if result.returncode != 0:
+                    # Need password - use osascript
+                    script = f'do shell script "pkill {signal_flag} -x openconnect" with administrator privileges'
+                    result = subprocess.run(["osascript", "-e", script], capture_output=True)
+            else:
+                # Linux: use pkexec
+                result = subprocess.run(
+                    ["pkexec", "pkill", signal_flag, "-x", "openconnect"],
+                    capture_output=True
+                )
+                if result.returncode != 0:
+                    result = subprocess.run(
+                        ["sudo", "-n", "pkill", signal_flag, "-x", "openconnect"],
+                        capture_output=True
+                    )
+
+            if result.returncode == 0 and force:
+                self.clear_stored_cookies()
             return result.returncode == 0
         except Exception:
             return False
@@ -408,11 +418,19 @@ class VPNBackend:
 
         try:
             # Get the openconnect process command line
-            result = subprocess.run(
-                ["pgrep", "-a", "openconnect"],
-                capture_output=True,
-                text=True
-            )
+            # macOS uses different pgrep flags
+            if sys.platform == "darwin":
+                result = subprocess.run(
+                    ["pgrep", "-lf", "openconnect"],
+                    capture_output=True,
+                    text=True
+                )
+            else:
+                result = subprocess.run(
+                    ["pgrep", "-a", "openconnect"],
+                    capture_output=True,
+                    text=True
+                )
             if result.returncode != 0:
                 return None
 

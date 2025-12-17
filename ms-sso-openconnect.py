@@ -1322,7 +1322,13 @@ def connect_vpn(vpn_server, protocol, cookies, no_dtls=False, username=None, all
     else:
         # Use sudo/pkexec for openconnect since we're running as normal user
         if use_pkexec:
-            priv_cmd = ["pkexec"] + cmd
+            if sys.platform == "darwin":
+                # macOS: use osascript for GUI sudo prompt
+                cmd_str = shlex.join(cmd)
+                osa_script = f'do shell script "{cmd_str}" with administrator privileges'
+                priv_cmd = ["osascript", "-e", osa_script]
+            else:
+                priv_cmd = ["pkexec"] + cmd
         else:
             priv_cmd = ["sudo"] + cmd
         process = subprocess.Popen(priv_cmd)
@@ -1336,7 +1342,7 @@ def connect_vpn(vpn_server, protocol, cookies, no_dtls=False, username=None, all
 
 def disconnect(force=False):
     """Kill any running openconnect process."""
-    signal_flag = "-TERM" if force else "-KILL"
+    signal_flag = "-TERM"
     # Use sudo since openconnect runs as root
     result = subprocess.run(["sudo", "pkill", signal_flag, "-f", "openconnect"], capture_output=True)
     if result.returncode == 0:
