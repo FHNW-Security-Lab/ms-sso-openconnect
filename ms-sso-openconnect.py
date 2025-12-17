@@ -478,9 +478,12 @@ def get_gp_prelogin_cookie(vpn_server, debug=False):
     return None, None, None
 
 
-def do_saml_auth(vpn_server, username, password, totp_secret_or_code, auto_totp=False, headless=True, debug=False):
+def do_saml_auth(vpn_server, username, password, totp_secret_or_code, auto_totp=False, headless=True, debug=False, protocol="anyconnect"):
     """
     Complete Microsoft SAML authentication and return the session cookie.
+
+    Args:
+        protocol: VPN protocol - "anyconnect" for Cisco AnyConnect, "gp" for GlobalProtect
     """
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
     import pwd
@@ -488,7 +491,10 @@ def do_saml_auth(vpn_server, username, password, totp_secret_or_code, auto_totp=
     vpn_url = f"https://{vpn_server}"
 
     # For GlobalProtect, try to get prelogin-cookie first
-    gp_prelogin_cookie, gp_saml_request, gp_gateway_ip = get_gp_prelogin_cookie(vpn_server, debug)
+    # For AnyConnect, skip this - it uses a different SAML flow
+    gp_prelogin_cookie, gp_saml_request, gp_gateway_ip = None, None, None
+    if protocol == "gp":
+        gp_prelogin_cookie, gp_saml_request, gp_gateway_ip = get_gp_prelogin_cookie(vpn_server, debug)
 
     # Ensure Playwright uses the real user's browser cache (not root's)
     real_user = os.environ.get('SUDO_USER', os.environ.get('USER', 'root'))
@@ -620,10 +626,11 @@ def do_saml_auth(vpn_server, username, password, totp_secret_or_code, auto_totp=
         page.on("response", handle_response)
 
         try:
-            # 0. For GP, show prelogin-cookie status and determine start URL
+            # 0. Determine start URL based on protocol
             start_url = vpn_url
-            if gp_saml_request:
-                # Decode the saml-request to get the actual SAML auth URL
+
+            if protocol == "gp" and gp_saml_request:
+                # GlobalProtect: Decode the saml-request to get the actual SAML auth URL
                 import base64
                 try:
                     saml_url = base64.b64decode(gp_saml_request).decode('utf-8')
@@ -636,10 +643,15 @@ def do_saml_auth(vpn_server, username, password, totp_secret_or_code, auto_totp=
                     if debug:
                         print(f"    [DEBUG] Could not decode saml-request: {e}")
 
-            if gp_prelogin_cookie:
-                print(f"  [0/6] Got GP prelogin-cookie from prelogin.esp")
-            elif debug and not gp_saml_request:
-                print(f"  [0/6] No prelogin-cookie from prelogin.esp")
+                if gp_prelogin_cookie:
+                    print(f"  [0/6] Got GP prelogin-cookie from prelogin.esp")
+            elif protocol == "anyconnect":
+                # Cisco AnyConnect: Use SAML login URL with default tunnel group
+                # The tunnel group can vary, but "DefaultWEBVPNGroup" is common
+                start_url = f"https://{vpn_server}/+CSCOE+/saml/sp/login?tgname=DefaultWEBVPNGroup"
+                print(f"  [0/6] Using AnyConnect SAML URL")
+                if debug:
+                    print(f"    [DEBUG] AnyConnect SAML URL: {start_url}")
 
             # 1. Open VPN portal or SAML URL
             print("  [1/6] Opening VPN portal...")
@@ -647,6 +659,47 @@ def do_saml_auth(vpn_server, username, password, totp_secret_or_code, auto_totp=
             if debug:
                 page.screenshot(path="/tmp/vpn-step1-portal.png")
                 print("    [DEBUG] Screenshot: /tmp/vpn-step1-portal.png")
+
+            # Check if already authenticated (SSO session valid, browser redirected back to VPN)
+            # This can happen if Microsoft SSO session is still active from a recent login
+            # Wait briefly for any redirects to complete
+            time.sleep(1)
+            current_url = page.url
+            if vpn_server in current_url:
+                # We're on VPN domain - check if we have actual session cookies
+                all_cookies = context.cookies()
+                session_cookies = {}
+                for c in all_cookies:
+                    domain = c.get('domain', '')
+                    name = c['name']
+                    if (domain == vpn_server or domain == f'.{vpn_server}') and c.get('value'):
+                        session_cookies[name] = c['value']
+
+                # For AnyConnect, check for actual session cookie (webvpn, not just webvpnlogin)
+                # webvpnlogin=1 is just a pre-login flag, webvpn contains actual session
+                has_session = (
+                    session_cookies.get('webvpn') or  # AnyConnect session
+                    session_cookies.get('SVPNCOOKIE') or  # Alternate AnyConnect
+                    saml_result.get('saml_response') or  # GlobalProtect SAML
+                    saml_result.get('prelogin_cookie')  # GlobalProtect prelogin
+                )
+
+                if has_session:
+                    print("  -> Already authenticated (SSO session valid)")
+                    if debug:
+                        print(f"    [DEBUG] Session cookies: {list(session_cookies.keys())}")
+                    browser.close()
+                    # Return session cookies plus any captured SAML data
+                    if saml_result['saml_response']:
+                        session_cookies['SAMLResponse'] = saml_result['saml_response']
+                    if saml_result['prelogin_cookie']:
+                        session_cookies['prelogin-cookie'] = saml_result['prelogin_cookie']
+                    if gp_prelogin_cookie and 'prelogin-cookie' not in session_cookies:
+                        session_cookies['prelogin-cookie'] = gp_prelogin_cookie
+                    return session_cookies
+                else:
+                    if debug:
+                        print(f"    [DEBUG] On VPN but no session cookies (only: {list(session_cookies.keys())})")
 
             # 2. Enter username on Microsoft login
             print("  [2/6] Entering username...")
@@ -1089,9 +1142,24 @@ def do_saml_auth(vpn_server, username, password, totp_secret_or_code, auto_totp=
 
             browser.close()
 
-            if vpn_cookies:
+            # Validate we have actual session cookies, not just pre-login cookies
+            # AnyConnect pre-login cookies: webvpnlogin, webvpnLang, CSRFtoken
+            # AnyConnect session cookies: webvpn (with actual session data), webvpnc
+            # GlobalProtect: SAMLResponse, prelogin-cookie
+            has_valid_session = (
+                vpn_cookies.get('webvpn') or  # AnyConnect session
+                vpn_cookies.get('SVPNCOOKIE') or  # Alternate AnyConnect
+                vpn_cookies.get('SAMLResponse') or  # GlobalProtect SAML
+                vpn_cookies.get('prelogin-cookie')  # GlobalProtect prelogin
+            )
+
+            if vpn_cookies and has_valid_session:
                 print(f"\n{GREEN}Authentication successful!{NC}")
                 return vpn_cookies
+            elif vpn_cookies:
+                # Got some cookies but not actual session - likely pre-login only
+                print(f"\n{RED}No valid session cookies obtained (got: {list(vpn_cookies.keys())}){NC}")
+                return None
             else:
                 print(f"\n{RED}No session cookies obtained{NC}")
                 return None

@@ -20,6 +20,37 @@ import json
 import importlib.util
 import threading
 import time
+import logging
+import socket
+
+# Set up logging - use syslog for reliability
+log = logging.getLogger('nm-ms-sso')
+log.setLevel(logging.DEBUG)
+
+# Use syslog handler (most reliable for system services)
+try:
+    from logging.handlers import SysLogHandler
+    syslog_handler = SysLogHandler(address='/dev/log')
+    syslog_handler.setLevel(logging.DEBUG)
+    syslog_handler.setFormatter(logging.Formatter('nm-ms-sso: %(message)s'))
+    log.addHandler(syslog_handler)
+except Exception:
+    pass
+
+# Also log to stderr (journalctl captures this from systemd services)
+stderr_handler = logging.StreamHandler(sys.stderr)
+stderr_handler.setLevel(logging.DEBUG)
+stderr_handler.setFormatter(logging.Formatter('[nm-ms-sso] %(message)s'))
+log.addHandler(stderr_handler)
+
+# Try to also log to a file
+try:
+    file_handler = logging.FileHandler('/tmp/nm-ms-sso.log')
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter('%(asctime)s %(message)s'))
+    log.addHandler(file_handler)
+except Exception:
+    pass
 
 import gi
 gi.require_version('NM', '1.0')
@@ -78,6 +109,104 @@ def load_vpn_core():
     return vpn_core
 
 
+def get_nm_cache_dir():
+    """Get cache directory for NetworkManager plugin (system-wide)."""
+    cache_dir = "/var/cache/ms-sso-openconnect"
+    try:
+        os.makedirs(cache_dir, mode=0o755, exist_ok=True)
+    except PermissionError:
+        # Fall back to /tmp if /var/cache is not writable
+        cache_dir = "/tmp/ms-sso-openconnect-cache"
+        os.makedirs(cache_dir, mode=0o755, exist_ok=True)
+    return cache_dir
+
+
+def get_nm_cookie_file(connection_name):
+    """Get path to cookie cache file for a specific connection."""
+    cache_dir = get_nm_cache_dir()
+    # Sanitize name for filename
+    safe_name = connection_name.replace("/", "_").replace(":", "_").replace(" ", "_")
+    return os.path.join(cache_dir, f"session_{safe_name}.json")
+
+
+def store_nm_cookies(connection_name, cookies, usergroup=None):
+    """Store session cookies in a secure file (NetworkManager version)."""
+    try:
+        if not cookies:
+            log.warning("No cookies to store")
+            return False
+
+        cookie_file = get_nm_cookie_file(connection_name)
+        data = {
+            "cookies": cookies,
+            "timestamp": int(time.time())
+        }
+        if usergroup:
+            data["usergroup"] = usergroup
+
+        with open(cookie_file, 'w') as f:
+            json.dump(data, f)
+        os.chmod(cookie_file, 0o600)
+
+        log.info(f"Cookies stored to {cookie_file}")
+        log.debug(f"Stored cookie keys: {list(cookies.keys())}")
+        # Log cookie value lengths for debugging (not the actual values for security)
+        for k, v in cookies.items():
+            log.debug(f"  {k}: {len(str(v))} chars")
+        return True
+    except Exception as e:
+        log.error(f"Could not cache cookies: {e}")
+        return False
+
+
+def get_nm_stored_cookies(connection_name, max_age_hours=12):
+    """Retrieve cached session cookies from file (NetworkManager version)."""
+    try:
+        cookie_file = get_nm_cookie_file(connection_name)
+        log.debug(f"Looking for cached cookies at {cookie_file}")
+        if not os.path.exists(cookie_file):
+            log.info(f"No cached cookies at {cookie_file}")
+            return None
+
+        with open(cookie_file, 'r') as f:
+            data = json.load(f)
+
+        age_seconds = int(time.time()) - data.get("timestamp", 0)
+        if age_seconds > max_age_hours * 3600:
+            log.info(f"Cached cookies expired ({age_seconds}s old, max {max_age_hours}h)")
+            clear_nm_cookies(connection_name)
+            return None
+
+        cookies = data.get("cookies")
+        if not cookies:
+            log.warning("Cached cookie file has no cookies")
+            return None
+
+        usergroup = data.get("usergroup")
+        log.info(f"Found cached cookies ({age_seconds}s old)")
+        log.debug(f"Retrieved cookie keys: {list(cookies.keys())}")
+        # Log cookie value lengths for debugging
+        for k, v in cookies.items():
+            log.debug(f"  {k}: {len(str(v))} chars")
+        return (cookies, usergroup)
+    except Exception as e:
+        log.error(f"Error reading cached cookies: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def clear_nm_cookies(connection_name):
+    """Clear cached cookies file."""
+    try:
+        cookie_file = get_nm_cookie_file(connection_name)
+        if os.path.exists(cookie_file):
+            os.remove(cookie_file)
+            log.info("Cleared cached cookies")
+    except Exception as e:
+        log.error(f"Error clearing cookies: {e}")
+
+
 class VPNPluginService(dbus.service.Object):
     """NetworkManager VPN Plugin D-Bus Service."""
 
@@ -100,9 +229,9 @@ class VPNPluginService(dbus.service.Object):
         # Load VPN core module
         try:
             self.vpn_core = load_vpn_core()
-            print(f"[nm-ms-sso] Loaded VPN core module")
+            log.info(f"Loaded VPN core module")
         except Exception as e:
-            print(f"[nm-ms-sso] Error loading VPN core: {e}")
+            log.info(f"Error loading VPN core: {e}")
 
         # Set initial state
         self._set_state(NM_VPN_SERVICE_STATE_INIT)
@@ -112,14 +241,20 @@ class VPNPluginService(dbus.service.Object):
 
     def _reset_inactivity_timeout(self):
         """Reset the inactivity timeout."""
-        if self.inactivity_timeout:
-            GLib.source_remove(self.inactivity_timeout)
+        if self.inactivity_timeout is not None:
+            # Check if source still exists before removing to avoid GLib warning
+            source = GLib.main_context_default().find_source_by_id(self.inactivity_timeout)
+            if source is not None:
+                GLib.source_remove(self.inactivity_timeout)
+            self.inactivity_timeout = None
         self.inactivity_timeout = GLib.timeout_add_seconds(120, self._on_inactivity_timeout)
 
     def _on_inactivity_timeout(self):
         """Called when the service has been inactive for too long."""
+        # Mark timeout as fired so we don't try to remove it later
+        self.inactivity_timeout = None
         if self.state in (NM_VPN_SERVICE_STATE_INIT, NM_VPN_SERVICE_STATE_STOPPED):
-            print("[nm-ms-sso] Inactivity timeout, shutting down")
+            log.info("Inactivity timeout, shutting down")
             self._shutdown()
         return False
 
@@ -140,16 +275,16 @@ class VPNPluginService(dbus.service.Object):
         secrets = {}
 
         # Debug: print full settings structure
-        print(f"[nm-ms-sso] Full settings keys: {list(settings.keys())}")
+        log.info(f"Full settings keys: {list(settings.keys())}")
 
         # Get VPN settings
         vpn_settings = settings.get('vpn', {})
         vpn_data = vpn_settings.get('data', {})
         vpn_secrets = vpn_settings.get('secrets', {})
 
-        print(f"[nm-ms-sso] VPN settings keys: {list(vpn_settings.keys())}")
-        print(f"[nm-ms-sso] VPN data: {vpn_data}")
-        print(f"[nm-ms-sso] VPN secrets keys: {list(vpn_secrets.keys())}")
+        log.info(f"VPN settings keys: {list(vpn_settings.keys())}")
+        log.info(f"VPN data: {vpn_data}")
+        log.info(f"VPN secrets keys: {list(vpn_secrets.keys())}")
 
         # Extract data fields
         secrets['gateway'] = vpn_data.get('gateway', '')
@@ -163,9 +298,9 @@ class VPNPluginService(dbus.service.Object):
         # If secrets not provided, try to get from keyring using libsecret
         # Use UUID (stable identifier) not connection name
         if not secrets['password'] or not secrets['totp_secret']:
-            print(f"[nm-ms-sso] Secrets not in connection, trying keyring...")
+            log.info(f"Secrets not in connection, trying keyring...")
             conn_uuid = settings.get('connection', {}).get('uuid', '')
-            print(f"[nm-ms-sso] Connection UUID for keyring: {conn_uuid}")
+            log.info(f"Connection UUID for keyring: {conn_uuid}")
             if conn_uuid:
                 try:
                     # Use GObject introspection for libsecret (same schema as C editor)
@@ -187,9 +322,9 @@ class VPNPluginService(dbus.service.Object):
                         )
                         if pw:
                             secrets['password'] = pw
-                            print(f"[nm-ms-sso] Found password in keyring")
+                            log.info(f"Found password in keyring")
                         else:
-                            print(f"[nm-ms-sso] Password not found in keyring")
+                            log.info(f"Password not found in keyring")
 
                     if not secrets['totp_secret']:
                         totp = Secret.password_lookup_sync(
@@ -197,12 +332,12 @@ class VPNPluginService(dbus.service.Object):
                         )
                         if totp:
                             secrets['totp_secret'] = totp
-                            print(f"[nm-ms-sso] Found TOTP secret in keyring")
+                            log.info(f"Found TOTP secret in keyring")
                         else:
-                            print(f"[nm-ms-sso] TOTP secret not found in keyring")
+                            log.info(f"TOTP secret not found in keyring")
 
                 except Exception as ke:
-                    print(f"[nm-ms-sso] Keyring error: {ke}")
+                    log.info(f"Keyring error: {ke}")
                     import traceback
                     traceback.print_exc()
 
@@ -231,67 +366,139 @@ class VPNPluginService(dbus.service.Object):
             if not username:
                 raise Exception("No username specified")
 
-            print(f"[nm-ms-sso] Connecting to {gateway} via {protocol}")
-            print(f"[nm-ms-sso] Username: {username}")
-            print(f"[nm-ms-sso] Password: {'(set)' if password else '(not set)'}")
-            print(f"[nm-ms-sso] TOTP: {'(set)' if totp_secret else '(not set)'}")
+            log.info(f"Connecting to {gateway} via {protocol}")
+            log.info(f"Username: {username}")
+            log.debug(f"Password: {'(set)' if password else '(not set)'}")
+            log.debug(f"TOTP: {'(set)' if totp_secret else '(not set)'}")
 
             # Store gateway for config emission
             self.current_gateway = gateway
 
+            # IMPORTANT: Resolve gateway IP NOW, before VPN connects
+            # After VPN connects, DNS switches to VPN DNS servers which can't resolve external hostnames
+            self.current_gateway_ip = None
+            try:
+                self.current_gateway_ip = socket.gethostbyname(gateway)
+                log.info(f"Pre-resolved gateway {gateway} -> {self.current_gateway_ip}")
+            except Exception as e:
+                log.warning(f"Failed to pre-resolve gateway {gateway}: {e}")
+                # If gateway is already an IP address, use it
+                if gateway and gateway[0].isdigit():
+                    self.current_gateway_ip = gateway
+                    log.info(f"Gateway appears to be an IP address: {gateway}")
+
             # Connection name for cookie cache
             connection_name = f"nm-{gateway}"
+            log.debug(f"Cookie cache connection name: {connection_name}")
 
             # Try connection with retry on cookie rejection
             max_attempts = 2
             for attempt in range(max_attempts):
+                log.info(f"Connection attempt {attempt + 1}/{max_attempts}")
+
                 # Try cached cookies first (only on first attempt)
                 cookies = None
                 used_cache = False
 
                 if attempt == 0:
-                    cached = self.vpn_core.get_stored_cookies(connection_name, max_age_hours=12)
+                    log.debug("Checking for cached cookies...")
+                    cached = get_nm_stored_cookies(connection_name, max_age_hours=12)
                     if cached:
-                        cookies, _ = cached[0], cached[1] if len(cached) > 1 else None
+                        # cached is tuple (cookies_dict, usergroup)
+                        cookies, usergroup = cached
                         used_cache = True
-                        print(f"[nm-ms-sso] Trying cached cookies...")
+                        log.info(f"Using cached cookies (keys: {list(cookies.keys()) if cookies else 'none'})")
+                        # Debug: write cached cookies to file for comparison
+                        try:
+                            with open('/tmp/nm-vpn-cached-cookies.json', 'w') as f:
+                                import json
+                                json.dump({"source": "cache", "cookies": cookies, "usergroup": usergroup}, f, indent=2)
+                            log.debug(f"Cached cookies written to /tmp/nm-vpn-cached-cookies.json")
+                        except Exception as e:
+                            log.debug(f"Could not write cached cookies debug file: {e}")
+                    else:
+                        log.info("No valid cached cookies found")
 
                 # If no cached cookies or this is a retry, authenticate
                 if not cookies:
-                    print(f"[nm-ms-sso] Performing SAML authentication...")
-                    cookies = self.vpn_core.do_saml_auth(
-                        vpn_server=gateway,
-                        username=username,
-                        password=password,
-                        totp_secret_or_code=totp_secret,
-                        auto_totp=True,
-                        headless=True,
-                        debug=False
-                    )
+                    log.info("Performing SAML authentication...")
+
+                    # Ensure playwright can find the browser
+                    # Check multiple possible locations
+                    import glob
+                    browser_paths = [
+                        "/root/.cache/ms-playwright",
+                        "/var/cache/ms-playwright",
+                    ]
+                    # Expand user home directories
+                    home_paths = glob.glob("/home/*/.cache/ms-playwright")
+                    browser_paths.extend(home_paths)
+
+                    # Try to find existing playwright installation
+                    playwright_path_found = False
+                    for p in browser_paths:
+                        if not os.path.isdir(p):
+                            continue
+                        # Check for chromium directory (e.g., chromium-1234)
+                        chromium_dirs = glob.glob(os.path.join(p, "chromium*"))
+                        if chromium_dirs:
+                            os.environ['PLAYWRIGHT_BROWSERS_PATH'] = p
+                            log.info(f"Using playwright browsers from: {p}")
+                            playwright_path_found = True
+                            break
+
+                    if not playwright_path_found:
+                        log.warning(f"No playwright browser found in any of: {browser_paths}")
+
+                    try:
+                        cookies = self.vpn_core.do_saml_auth(
+                            vpn_server=gateway,
+                            username=username,
+                            password=password,
+                            totp_secret_or_code=totp_secret,
+                            auto_totp=True,
+                            headless=True,
+                            debug=True,  # Enable debug to see screenshots
+                            protocol=protocol  # Pass protocol for correct SAML URL
+                        )
+                        log.info(f"SAML auth returned cookies: {list(cookies.keys()) if cookies else 'none'}")
+                        # Debug: write fresh cookies to file for comparison
+                        try:
+                            with open('/tmp/nm-vpn-fresh-cookies.json', 'w') as f:
+                                import json
+                                json.dump({"source": "fresh_saml", "cookies": cookies}, f, indent=2)
+                            log.debug(f"Fresh cookies written to /tmp/nm-vpn-fresh-cookies.json")
+                        except Exception as e:
+                            log.debug(f"Could not write fresh cookies debug file: {e}")
+                    except Exception as auth_err:
+                        log.error(f"SAML auth error: {auth_err}")
+                        import traceback
+                        traceback.print_exc()
+                        raise Exception(f"SAML authentication error: {auth_err}")
 
                     if not cookies:
-                        raise Exception("SAML authentication failed")
+                        raise Exception("SAML authentication returned no cookies")
 
-                    # Store fresh cookies
-                    self.vpn_core.store_cookies(connection_name, cookies, usergroup='portal:prelogin-cookie')
-                    print(f"[nm-ms-sso] Cookies stored for future connections")
+                    # Store fresh cookies using NM-specific storage
+                    store_nm_cookies(connection_name, cookies, usergroup='portal:prelogin-cookie')
 
                 # Try to connect with these cookies
                 success, error_msg = self._attempt_vpn_connection(gateway, protocol, cookies)
 
                 if success:
+                    log.info("VPN connection successful")
                     break  # Connection successful
                 elif used_cache and attempt < max_attempts - 1:
                     # Cookie was rejected, clear cache and retry with fresh auth
-                    print(f"[nm-ms-sso] Cookie rejected, clearing cache and re-authenticating...")
-                    self.vpn_core.clear_stored_cookies(connection_name)
+                    log.warning("Cookie rejected, clearing cache and re-authenticating...")
+                    clear_nm_cookies(connection_name)
                     continue
                 else:
                     raise Exception(error_msg or "VPN connection failed")
 
         except Exception as e:
             error_msg = str(e)
-            print(f"[nm-ms-sso] Connection error: {error_msg}")
+            log.error(f"Connection error: {error_msg}")
             import traceback
             traceback.print_exc()
             GLib.idle_add(lambda msg=error_msg: self._emit_failure(msg))
@@ -303,6 +510,8 @@ class VPNPluginService(dbus.service.Object):
             Tuple of (success: bool, error_message: str or None)
         """
         try:
+            # Log cookie info for debugging
+            log.debug(f"Cookie keys: {list(cookies.keys())}")
 
             # Connect to VPN
             # We use subprocess so we can monitor and return control
@@ -310,6 +519,7 @@ class VPNPluginService(dbus.service.Object):
 
             if protocol == 'gp' and 'prelogin-cookie' in cookies:
                 cookie_str = cookies.get('prelogin-cookie', '')
+                log.debug(f"Using GlobalProtect prelogin-cookie (len={len(cookie_str)})")
                 cmd = [
                     "openconnect",
                     "--verbose",
@@ -329,6 +539,10 @@ class VPNPluginService(dbus.service.Object):
                 self.vpn_process.stdin.flush()
             else:
                 cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
+                log.debug(f"Using AnyConnect cookie (len={len(cookie_str)})")
+                # Log first/last parts of cookie for debugging (without revealing sensitive parts)
+                if len(cookie_str) > 40:
+                    log.debug(f"Cookie preview: {cookie_str[:20]}...{cookie_str[-20:]}")
                 cmd = [
                     "openconnect",
                     "--verbose",
@@ -336,13 +550,26 @@ class VPNPluginService(dbus.service.Object):
                     f"--cookie={cookie_str}",
                     gateway,
                 ]
+                log.debug(f"OpenConnect command: {' '.join(cmd[:4])} [cookie] {gateway}")
+                # Also log the full command to a debug file for comparison
+                try:
+                    with open('/tmp/nm-vpn-debug-cmd.txt', 'w') as f:
+                        f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                        f.write(f"Command: {cmd}\n")
+                        f.write(f"Cookie string length: {len(cookie_str)}\n")
+                        f.write(f"Cookie keys: {list(cookies.keys())}\n")
+                        f.write(f"Cookie string: {cookie_str}\n")  # Full cookie for debugging
+                        f.write(f"\nManual test command:\n")
+                        f.write(f"sudo openconnect --verbose --protocol={proto_flag} --cookie='{cookie_str}' {gateway}\n")
+                except:
+                    pass
                 self.vpn_process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT
                 )
 
-            print(f"[nm-ms-sso] OpenConnect started (PID {self.vpn_process.pid})")
+            log.info(f"OpenConnect started (PID {self.vpn_process.pid})")
 
             # Initialize DNS server list
             self.vpn_dns_servers = []
@@ -371,7 +598,10 @@ class VPNPluginService(dbus.service.Object):
                             output_buffer += remaining.decode('utf-8', errors='replace')
                     except:
                         pass
-                    raise Exception(f"OpenConnect exited: {output_buffer[-500:]}")
+                    exit_code = self.vpn_process.returncode
+                    log.error(f"OpenConnect exited prematurely with code {exit_code}")
+                    log.error(f"OpenConnect output:\n{output_buffer}")
+                    raise Exception(f"OpenConnect exited (code {exit_code}): {output_buffer[-500:]}")
 
                 # Try to read any available output (non-blocking)
                 try:
@@ -382,17 +612,17 @@ class VPNPluginService(dbus.service.Object):
                         # Parse for DNS servers (OpenConnect outputs: "Received DNS server X.X.X.X")
                         for line in text.split('\n'):
                             if 'DNS' in line.upper():
-                                print(f"[nm-ms-sso] OpenConnect DNS info: {line.strip()}")
+                                log.info(f"OpenConnect DNS info: {line.strip()}")
                                 # Try to extract IP from various formats
                                 import re
                                 ips = re.findall(r'\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b', line)
                                 for ip in ips:
                                     if ip not in self.vpn_dns_servers:
                                         self.vpn_dns_servers.append(ip)
-                                        print(f"[nm-ms-sso] Captured VPN DNS: {ip}")
+                                        log.info(f"Captured VPN DNS: {ip}")
                             # Also capture search domains
                             if 'domain' in line.lower() or 'search' in line.lower():
-                                print(f"[nm-ms-sso] OpenConnect domain info: {line.strip()}")
+                                log.info(f"OpenConnect domain info: {line.strip()}")
                 except (BlockingIOError, IOError):
                     pass  # No data available yet
 
@@ -406,7 +636,7 @@ class VPNPluginService(dbus.service.Object):
                             parts = line.split(':')
                             if len(parts) >= 2:
                                 self.current_tun_device = parts[1].strip()
-                                print(f"[nm-ms-sso] Found tun device: {self.current_tun_device}")
+                                log.info(f"Found tun device: {self.current_tun_device}")
                                 break
                     connected = True
                     break
@@ -422,7 +652,7 @@ class VPNPluginService(dbus.service.Object):
             # Give vpnc-script a moment to configure DNS
             time.sleep(1)
 
-            print(f"[nm-ms-sso] VPN DNS servers captured: {self.vpn_dns_servers}")
+            log.info(f"VPN DNS servers captured: {self.vpn_dns_servers}")
 
             # Emit full IP config now that interface is up
             GLib.idle_add(self._emit_connected)
@@ -437,7 +667,7 @@ class VPNPluginService(dbus.service.Object):
 
         except Exception as e:
             error_msg = str(e)
-            print(f"[nm-ms-sso] Attempt error: {error_msg}")
+            log.info(f"Attempt error: {error_msg}")
             # Check if it's a cookie rejection error
             if 'cookie' in error_msg.lower() and ('reject' in error_msg.lower() or 'invalid' in error_msg.lower()):
                 return (False, "Cookie rejected by server")
@@ -449,23 +679,19 @@ class VPNPluginService(dbus.service.Object):
         Note: We DON'T include tundev here because NetworkManager will try to look it up
         immediately and fail if it doesn't exist yet.
         """
-        import socket
         import struct
 
         try:
             gateway = self.current_gateway or ''
 
-            print(f"[nm-ms-sso] Emitting initial config (no tundev), gateway {gateway}")
+            log.info(f"Emitting initial config (no tundev), gateway {gateway}")
 
-            # Resolve gateway hostname to IP address
-            gateway_ip = None
-            try:
-                gateway_ip = socket.gethostbyname(gateway)
-                print(f"[nm-ms-sso] Resolved gateway {gateway} -> {gateway_ip}")
-            except Exception as e:
-                print(f"[nm-ms-sso] Failed to resolve gateway {gateway}: {e}")
-                if gateway and gateway[0].isdigit():
-                    gateway_ip = gateway
+            # Use pre-resolved gateway IP (resolved before VPN connected, when external DNS was available)
+            gateway_ip = getattr(self, 'current_gateway_ip', None)
+            if gateway_ip:
+                log.info(f"Using pre-resolved gateway IP: {gateway_ip}")
+            else:
+                log.warning(f"No pre-resolved gateway IP available, gateway uint will be 0")
 
             # Convert gateway IP to uint32 (network byte order)
             gateway_uint = 0
@@ -474,9 +700,9 @@ class VPNPluginService(dbus.service.Object):
                     gw_parts = [int(x) for x in gateway_ip.split('.')]
                     if len(gw_parts) == 4:
                         gateway_uint = struct.unpack('!I', bytes(gw_parts))[0]
-                        print(f"[nm-ms-sso] Gateway uint32: {gateway_uint} (0x{gateway_uint:08x})")
+                        log.info(f"Gateway uint32: {gateway_uint} (0x{gateway_uint:08x})")
                 except Exception as e:
-                    print(f"[nm-ms-sso] Warning: Could not convert gateway IP '{gateway_ip}': {e}")
+                    log.info(f"Warning: Could not convert gateway IP '{gateway_ip}': {e}")
 
             # Emit Config signal WITHOUT tundev - just gateway info
             # tundev will be set in the full Config after interface is up
@@ -486,10 +712,10 @@ class VPNPluginService(dbus.service.Object):
                 'has-ip6': dbus.Boolean(False),
             }, signature='sv')
             self.Config(config)
-            print(f"[nm-ms-sso] Emitted initial Config signal (gateway only)")
+            log.info(f"Emitted initial Config signal (gateway only)")
 
         except Exception as e:
-            print(f"[nm-ms-sso] Error emitting initial config: {e}")
+            log.info(f"Error emitting initial config: {e}")
             import traceback
             traceback.print_exc()
 
@@ -497,7 +723,6 @@ class VPNPluginService(dbus.service.Object):
 
     def _emit_connected(self):
         """Emit IP config after interface is up (called from main thread)."""
-        import socket
         import struct
 
         try:
@@ -505,7 +730,7 @@ class VPNPluginService(dbus.service.Object):
             tun_dev = self.current_tun_device or 'tun0'
             gateway = self.current_gateway or ''
 
-            print(f"[nm-ms-sso] Emitting config for {tun_dev}, gateway {gateway}")
+            log.info(f"Emitting config for {tun_dev}, gateway {gateway}")
 
             # Get IP address from interface
             result = subprocess.run(['ip', '-4', 'addr', 'show', tun_dev], capture_output=True, text=True)
@@ -524,18 +749,14 @@ class VPNPluginService(dbus.service.Object):
                             ip_addr = addr_prefix
                         break
 
-            print(f"[nm-ms-sso] Detected IP: {ip_addr}/{prefix}")
+            log.info(f"Detected IP: {ip_addr}/{prefix}")
 
-            # Resolve gateway hostname to IP address
-            gateway_ip = None
-            try:
-                gateway_ip = socket.gethostbyname(gateway)
-                print(f"[nm-ms-sso] Resolved gateway {gateway} -> {gateway_ip}")
-            except Exception as e:
-                print(f"[nm-ms-sso] Failed to resolve gateway {gateway}: {e}")
-                # Try to use gateway as-is if it looks like an IP
-                if gateway and gateway[0].isdigit():
-                    gateway_ip = gateway
+            # Use pre-resolved gateway IP (resolved before VPN connected, when external DNS was available)
+            gateway_ip = getattr(self, 'current_gateway_ip', None)
+            if gateway_ip:
+                log.info(f"Using pre-resolved gateway IP: {gateway_ip}")
+            else:
+                log.warning(f"No pre-resolved gateway IP available, gateway uint will be 0")
 
             # Convert gateway IP to uint32 (network byte order)
             gateway_uint = 0
@@ -544,12 +765,12 @@ class VPNPluginService(dbus.service.Object):
                     gw_parts = [int(x) for x in gateway_ip.split('.')]
                     if len(gw_parts) == 4:
                         gateway_uint = struct.unpack('!I', bytes(gw_parts))[0]
-                        print(f"[nm-ms-sso] Gateway uint32: {gateway_uint} (0x{gateway_uint:08x})")
+                        log.info(f"Gateway uint32: {gateway_uint} (0x{gateway_uint:08x})")
                 except Exception as e:
-                    print(f"[nm-ms-sso] Warning: Could not convert gateway IP '{gateway_ip}': {e}")
+                    log.info(f"Warning: Could not convert gateway IP '{gateway_ip}': {e}")
 
             if gateway_uint == 0:
-                print(f"[nm-ms-sso] ERROR: Gateway is 0, NetworkManager will reject this!")
+                log.info(f"ERROR: Gateway is 0, NetworkManager will reject this!")
 
             # Emit Config signal with tunnel device info
             # gateway must be uint32 (network byte order)
@@ -560,7 +781,7 @@ class VPNPluginService(dbus.service.Object):
                 'has-ip6': dbus.Boolean(False),
             }, signature='sv')
             self.Config(config)
-            print(f"[nm-ms-sso] Emitted Config signal")
+            log.info(f"Emitted Config signal")
 
             # Emit Ip4Config signal with proper format
             # NetworkManager expects 'addresses' as array of arrays: [[addr, prefix, gateway], ...]
@@ -593,11 +814,11 @@ class VPNPluginService(dbus.service.Object):
                                                 # IP a.b.c.d becomes: a + b*256 + c*65536 + d*16777216
                                                 ns_uint = ns_parts[0] | (ns_parts[1] << 8) | (ns_parts[2] << 16) | (ns_parts[3] << 24)
                                                 dns_servers.append(dbus.UInt32(ns_uint))
-                                                print(f"[nm-ms-sso] Found DNS from resolvectl: {ns} -> {ns_uint}")
+                                                log.info(f"Found DNS from resolvectl: {ns} -> {ns_uint}")
                                         except:
                                             pass
                 except Exception as e:
-                    print(f"[nm-ms-sso] resolvectl failed: {e}")
+                    log.info(f"resolvectl failed: {e}")
 
                 # Method 2: If no DNS yet, check stored DNS from OpenConnect output
                 if not dns_servers and hasattr(self, 'vpn_dns_servers') and self.vpn_dns_servers:
@@ -608,7 +829,7 @@ class VPNPluginService(dbus.service.Object):
                                 # Convert IP to uint32 in host byte order (little-endian on x86)
                                 ns_uint = ns_parts[0] | (ns_parts[1] << 8) | (ns_parts[2] << 16) | (ns_parts[3] << 24)
                                 dns_servers.append(dbus.UInt32(ns_uint))
-                                print(f"[nm-ms-sso] Using stored VPN DNS: {ns} -> {ns_uint}")
+                                log.info(f"Using stored VPN DNS: {ns} -> {ns_uint}")
                         except:
                             pass
 
@@ -625,13 +846,13 @@ class VPNPluginService(dbus.service.Object):
                                         # Convert IP to uint32 in host byte order (little-endian on x86)
                                         ns_uint = ns_parts[0] | (ns_parts[1] << 8) | (ns_parts[2] << 16) | (ns_parts[3] << 24)
                                         dns_servers.append(dbus.UInt32(ns_uint))
-                                        print(f"[nm-ms-sso] Found DNS from resolv.conf: {ns} -> {ns_uint}")
+                                        log.info(f"Found DNS from resolv.conf: {ns} -> {ns_uint}")
                                 except:
                                     pass  # Skip non-IPv4 nameservers
                     except:
                         pass
 
-                print(f"[nm-ms-sso] Total DNS servers found: {len(dns_servers)}")
+                log.info(f"Total DNS servers found: {len(dns_servers)}")
 
                 # Build addresses array: each address is [addr, prefix, gateway]
                 # For point-to-point VPN, gateway in address is typically 0
@@ -649,12 +870,12 @@ class VPNPluginService(dbus.service.Object):
                     'domains': dbus.Array([], signature='s'),
                 }, signature='sv')
                 self.Ip4Config(ip4_config)
-                print(f"[nm-ms-sso] Emitted Ip4Config signal: addr={ip_addr}/{prefix}, dns={len(dns_servers)} servers")
+                log.info(f"Emitted Ip4Config signal: addr={ip_addr}/{prefix}, dns={len(dns_servers)} servers")
 
             # Now set state to started
             self._set_state(NM_VPN_SERVICE_STATE_STARTED)
         except Exception as e:
-            print(f"[nm-ms-sso] Error emitting config: {e}")
+            log.info(f"Error emitting config: {e}")
             import traceback
             traceback.print_exc()
             self._set_state(NM_VPN_SERVICE_STATE_STARTED)
@@ -677,7 +898,7 @@ class VPNPluginService(dbus.service.Object):
                          in_signature='a{sa{sv}}', out_signature='')
     def Connect(self, connection):
         """Start VPN connection."""
-        print("[nm-ms-sso] Connect called")
+        log.info("Connect called")
         self._reset_inactivity_timeout()
 
         self._set_state(NM_VPN_SERVICE_STATE_STARTING)
@@ -694,28 +915,30 @@ class VPNPluginService(dbus.service.Object):
                          in_signature='a{sa{sv}}a{sv}', out_signature='')
     def ConnectInteractive(self, connection, details):
         """Start interactive VPN connection."""
-        print("[nm-ms-sso] ConnectInteractive called")
+        log.info("ConnectInteractive called")
         self.Connect(connection)
 
     @dbus.service.method(NM_VPN_DBUS_PLUGIN_INTERFACE,
                          in_signature='', out_signature='')
     def Disconnect(self):
         """Disconnect VPN."""
-        print("[nm-ms-sso] Disconnect called")
+        log.info("Disconnect called")
         self._reset_inactivity_timeout()
 
         self._set_state(NM_VPN_SERVICE_STATE_STOPPING)
 
-        # Kill openconnect process
+        # Kill openconnect process with SIGKILL to preserve session cookie
+        # SIGTERM causes OpenConnect to send a logout message which invalidates the cookie
         if self.vpn_process and self.vpn_process.poll() is None:
-            self.vpn_process.terminate()
+            log.info("Killing openconnect with SIGKILL to preserve session cookie")
+            self.vpn_process.kill()  # SIGKILL - no graceful logout
             try:
                 self.vpn_process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self.vpn_process.kill()
+                pass  # Already sent SIGKILL, nothing more we can do
 
-        # Also kill any other openconnect processes
-        subprocess.run(['pkill', '-TERM', '-x', 'openconnect'], capture_output=True)
+        # Also kill any other openconnect processes with SIGKILL
+        subprocess.run(['pkill', '-KILL', '-x', 'openconnect'], capture_output=True)
 
         self._set_state(NM_VPN_SERVICE_STATE_STOPPED)
 
@@ -723,7 +946,7 @@ class VPNPluginService(dbus.service.Object):
                          in_signature='a{sa{sv}}', out_signature='s')
     def NeedSecrets(self, settings):
         """Check if secrets are needed."""
-        print("[nm-ms-sso] NeedSecrets called")
+        log.info("NeedSecrets called")
         self._reset_inactivity_timeout()
 
         # Check if we have secrets
@@ -739,38 +962,38 @@ class VPNPluginService(dbus.service.Object):
                          in_signature='a{sa{sv}}', out_signature='')
     def NewSecrets(self, connection):
         """New secrets provided."""
-        print("[nm-ms-sso] NewSecrets called")
+        log.info("NewSecrets called")
         self._reset_inactivity_timeout()
 
     @dbus.service.method(NM_VPN_DBUS_PLUGIN_INTERFACE,
                          in_signature='a{sv}', out_signature='')
     def SetConfig(self, config):
         """Set VPN configuration."""
-        print("[nm-ms-sso] SetConfig called")
+        log.info("SetConfig called")
 
     @dbus.service.method(NM_VPN_DBUS_PLUGIN_INTERFACE,
                          in_signature='a{sv}', out_signature='')
     def SetIp4Config(self, config):
         """Set IPv4 configuration."""
-        print("[nm-ms-sso] SetIp4Config called")
+        log.info("SetIp4Config called")
 
     @dbus.service.method(NM_VPN_DBUS_PLUGIN_INTERFACE,
                          in_signature='a{sv}', out_signature='')
     def SetIp6Config(self, config):
         """Set IPv6 configuration."""
-        print("[nm-ms-sso] SetIp6Config called")
+        log.info("SetIp6Config called")
 
     @dbus.service.method(NM_VPN_DBUS_PLUGIN_INTERFACE,
                          in_signature='s', out_signature='')
     def SetFailure(self, reason):
         """Set failure reason."""
-        print(f"[nm-ms-sso] SetFailure called: {reason}")
+        log.info(f"SetFailure called: {reason}")
 
     # D-Bus signals
     @dbus.service.signal(NM_VPN_DBUS_PLUGIN_INTERFACE, signature='u')
     def StateChanged(self, state):
         """Emit state change signal."""
-        print(f"[nm-ms-sso] State changed to {state}")
+        log.info(f"State changed to {state}")
 
     @dbus.service.signal(NM_VPN_DBUS_PLUGIN_INTERFACE, signature='a{sv}')
     def Config(self, config):
@@ -790,7 +1013,7 @@ class VPNPluginService(dbus.service.Object):
     @dbus.service.signal(NM_VPN_DBUS_PLUGIN_INTERFACE, signature='u')
     def Failure(self, reason):
         """Emit failure signal."""
-        print(f"[nm-ms-sso] Failure: {reason}")
+        log.info(f"Failure: {reason}")
 
     @dbus.service.signal(NM_VPN_DBUS_PLUGIN_INTERFACE, signature='s')
     def SecretsRequired(self, message):
@@ -831,7 +1054,7 @@ class VPNPluginService(dbus.service.Object):
 
 def main():
     """Main entry point."""
-    print("[nm-ms-sso] Starting VPN plugin service")
+    log.info("Starting VPN plugin service")
 
     # Set up D-Bus main loop
     dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
@@ -840,7 +1063,7 @@ def main():
     try:
         bus = dbus.SystemBus()
     except dbus.exceptions.DBusException as e:
-        print(f"[nm-ms-sso] Failed to connect to system bus: {e}")
+        log.info(f"Failed to connect to system bus: {e}")
         sys.exit(1)
 
     # Create and run service
@@ -850,7 +1073,7 @@ def main():
     mainloop = GLib.MainLoop()
 
     def signal_handler(signum, frame):
-        print(f"[nm-ms-sso] Received signal {signum}, shutting down")
+        log.info(f"Received signal {signum}, shutting down")
         service.Disconnect()
         mainloop.quit()
 
@@ -862,7 +1085,7 @@ def main():
     except KeyboardInterrupt:
         pass
 
-    print("[nm-ms-sso] Service stopped")
+    log.info("Service stopped")
 
 
 if __name__ == '__main__':
