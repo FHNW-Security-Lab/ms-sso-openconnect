@@ -629,22 +629,31 @@ def do_saml_auth(vpn_server, username, password, totp_secret_or_code, auto_totp=
             # 0. Determine start URL based on protocol
             start_url = vpn_url
 
-            if protocol == "gp" and gp_saml_request:
-                # GlobalProtect: Decode the saml-request to get the actual SAML auth URL
-                import base64
-                try:
-                    saml_url = base64.b64decode(gp_saml_request).decode('utf-8')
-                    if saml_url.startswith('http'):
-                        start_url = saml_url
-                        print(f"  [0/6] Using SAML URL from prelogin.esp")
+            if protocol == "gp":
+                # GlobalProtect: Try to get SAML auth URL from prelogin.esp response
+                if gp_saml_request:
+                    import base64
+                    try:
+                        saml_url = base64.b64decode(gp_saml_request).decode('utf-8')
+                        if saml_url.startswith('http'):
+                            start_url = saml_url
+                            print(f"  [0/6] Using SAML URL from prelogin.esp")
+                            if debug:
+                                print(f"    [DEBUG] SAML URL: {saml_url[:60]}...")
+                    except Exception as e:
                         if debug:
-                            print(f"    [DEBUG] SAML URL: {saml_url[:60]}...")
-                except Exception as e:
-                    if debug:
-                        print(f"    [DEBUG] Could not decode saml-request: {e}")
+                            print(f"    [DEBUG] Could not decode saml-request: {e}")
+                        # Fall back to plain VPN URL
+                        start_url = vpn_url
 
                 if gp_prelogin_cookie:
                     print(f"  [0/6] Got GP prelogin-cookie from prelogin.esp")
+
+                # If no SAML URL was set, use plain VPN URL for GlobalProtect
+                if start_url == vpn_url:
+                    print(f"  [0/6] Using GlobalProtect portal URL directly")
+                    if debug:
+                        print(f"    [DEBUG] GP portal URL: {start_url}")
             elif protocol == "anyconnect":
                 # Cisco AnyConnect: Use SAML login URL with default tunnel group
                 # The tunnel group can vary, but "DefaultWEBVPNGroup" is common
@@ -884,6 +893,130 @@ def do_saml_auth(vpn_server, username, password, totp_secret_or_code, auto_totp=
                 print("    [DEBUG] HTML saved: /tmp/vpn-step4-2fa-page.html")
                 # Debug: print current URL
                 print(f"    [DEBUG] Current URL: {page.url}")
+
+            # === ERROR RECOVERY: Handle "Authentication attempt failed" error ===
+            # This error sometimes occurs during 2FA, refreshing the page allows retry
+            def check_and_handle_auth_error():
+                """Check for authentication error and refresh page if found.
+
+                Returns True if error was found and handled (page refreshed).
+                """
+                error_selectors = [
+                    'div:has-text("An error occurred")',
+                    'div:has-text("Authentication attempt failed")',
+                    '*:has-text("Select a different sign in option")',
+                    '#errorText',
+                    '.error-message',
+                ]
+
+                for selector in error_selectors:
+                    try:
+                        error_elem = page.query_selector(selector)
+                        if error_elem and error_elem.is_visible():
+                            error_text = error_elem.inner_text()[:100] if error_elem else "Unknown error"
+                            print(f"    -> Detected auth error: {error_text}...")
+                            print("    -> Refreshing page to retry...")
+                            if debug:
+                                page.screenshot(path="/tmp/vpn-step4-auth-error.png")
+                                print("    [DEBUG] Screenshot: /tmp/vpn-step4-auth-error.png")
+                            page.reload(wait_until="domcontentloaded")
+                            time.sleep(2)  # Wait for page to stabilize after refresh
+                            return True
+                    except:
+                        continue
+                return False
+
+            # Check for error and refresh if needed
+            error_recovered = check_and_handle_auth_error()
+            if error_recovered:
+                if debug:
+                    page.screenshot(path="/tmp/vpn-step4-after-refresh.png")
+                    print("    [DEBUG] Screenshot: /tmp/vpn-step4-after-refresh.png")
+
+            # === HANDLE NUMBER MATCHING PROMPT ===
+            # After refresh (or sometimes directly), we may see a number matching prompt
+            # with "Use a different verification option" link - click it to get to TOTP
+            def handle_number_matching_prompt():
+                """Handle the number matching prompt by clicking 'Use a different verification option'.
+
+                Returns True if prompt was found and handled.
+                """
+                # Check if we're on a number matching page (shows a 2-digit number like "71")
+                # These pages have text like "Open your Microsoft Authenticator app and tap the number"
+                number_match_indicators = [
+                    '*:has-text("tap the number you see")',
+                    '*:has-text("tap the number")',
+                    '*:has-text("Open your Microsoft Authenticator app")',
+                    'div.display-sign-container',  # Container for the number display
+                    '#displaySign',  # The number itself
+                ]
+
+                is_number_matching = False
+                for selector in number_match_indicators:
+                    try:
+                        elem = page.query_selector(selector)
+                        if elem and elem.is_visible():
+                            is_number_matching = True
+                            if debug:
+                                print(f"    [DEBUG] Found number matching indicator: {selector}")
+                            break
+                    except:
+                        continue
+
+                if is_number_matching:
+                    print("    -> Detected number matching prompt, looking for alternative option...")
+                    if debug:
+                        page.screenshot(path="/tmp/vpn-step4-number-match.png")
+                        print("    [DEBUG] Screenshot: /tmp/vpn-step4-number-match.png")
+
+                    # Click "Use a different verification option" link
+                    different_option_selectors = [
+                        'a:has-text("Use a different verification option")',
+                        'a:has-text("different verification option")',
+                        '#signInAnotherWay',
+                        'a#signInAnotherWay',
+                        'a:has-text("I can\'t use my Microsoft Authenticator app right now")',
+                        'a:has-text("Sign in another way")',
+                    ]
+
+                    for selector in different_option_selectors:
+                        try:
+                            link = page.query_selector(selector)
+                            if link and link.is_visible():
+                                link.click(force=True)
+                                time.sleep(1)
+                                page.wait_for_load_state("domcontentloaded")
+                                print(f"    -> Clicked: '{selector}'")
+                                if debug:
+                                    page.screenshot(path="/tmp/vpn-step4-after-different-option.png")
+                                    print("    [DEBUG] Screenshot: /tmp/vpn-step4-after-different-option.png")
+                                return True
+                        except:
+                            continue
+
+                    # Try waiting for the link if not immediately visible
+                    for selector in different_option_selectors[:3]:  # Only try first few
+                        try:
+                            link = page.wait_for_selector(selector, timeout=2000)
+                            if link and link.is_visible():
+                                link.click(force=True)
+                                time.sleep(1)
+                                page.wait_for_load_state("domcontentloaded")
+                                print(f"    -> Clicked (waited): '{selector}'")
+                                return True
+                        except PWTimeout:
+                            continue
+
+                return False
+
+            # Handle number matching prompt if present
+            number_prompt_handled = handle_number_matching_prompt()
+            if number_prompt_handled:
+                # After clicking different option, we might need to wait for TOTP option
+                time.sleep(1)
+                if debug:
+                    page.screenshot(path="/tmp/vpn-step4-after-number-prompt.png")
+                    print("    [DEBUG] Screenshot: /tmp/vpn-step4-after-number-prompt.png")
 
             # OTP input selectors (used multiple times)
             otp_selectors = [
@@ -1510,7 +1643,8 @@ def main():
         address, username, password, totp_secret,
         auto_totp=True,
         headless=not args.visible,
-        debug=args.debug
+        debug=args.debug,
+        protocol=protocol
     )
 
     if cookies:

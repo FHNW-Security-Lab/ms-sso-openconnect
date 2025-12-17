@@ -483,7 +483,7 @@ class VPNPluginService(dbus.service.Object):
                     store_nm_cookies(connection_name, cookies, usergroup='portal:prelogin-cookie')
 
                 # Try to connect with these cookies
-                success, error_msg = self._attempt_vpn_connection(gateway, protocol, cookies)
+                success, error_msg = self._attempt_vpn_connection(gateway, protocol, cookies, username)
 
                 if success:
                     log.info("VPN connection successful")
@@ -503,7 +503,7 @@ class VPNPluginService(dbus.service.Object):
             traceback.print_exc()
             GLib.idle_add(lambda msg=error_msg: self._emit_failure(msg))
 
-    def _attempt_vpn_connection(self, gateway, protocol, cookies):
+    def _attempt_vpn_connection(self, gateway, protocol, cookies, username=None):
         """Attempt to establish VPN connection with given cookies.
 
         Returns:
@@ -525,10 +525,14 @@ class VPNPluginService(dbus.service.Object):
                     "--verbose",
                     f"--protocol={proto_flag}",
                     "--passwd-on-stdin",
+                    "--useragent=PAN GlobalProtect",
                     "--usergroup=portal:prelogin-cookie",
                     "--os=linux-64",
                     gateway,
                 ]
+                # Add username if available (required for GlobalProtect)
+                if username:
+                    cmd.insert(5, f"--user={username}")
                 self.vpn_process = subprocess.Popen(
                     cmd,
                     stdin=subprocess.PIPE,
