@@ -1107,91 +1107,64 @@ def do_saml_auth(vpn_server, username, password, totp_secret_or_code, auto_totp=
             return None
 
 
+def _get_pid_file():
+    """Get path to openconnect PID file."""
+    cache_dir = _get_cache_dir()
+    return os.path.join(cache_dir, "openconnect.pid")
+
+
 def connect_vpn(vpn_server, protocol, cookies, no_dtls=False, username=None, allow_fallback=False,
                 connection_name=None, cached_usergroup=None, use_pkexec=False):
-    """Connect to VPN using openconnect with the obtained cookie.
-
-    If allow_fallback=True, use subprocess so we can return on failure.
-    If allow_fallback=False, use execvp which replaces the process (no return).
-
-    Args:
-        connection_name: Connection name for updating cookie cache
-        cached_usergroup: Cached usergroup from previous connection (e.g., 'portal:portal-userauthcookie')
-        use_pkexec: Use pkexec instead of sudo (for GUI without terminal)
-    """
+    """Connect to VPN using openconnect with --background and --pid-file."""
 
     print(f"\n{GREEN}Connecting to VPN...{NC}\n")
 
     proto_flag = PROTOCOLS.get(protocol, {}).get("flag", "anyconnect")
+    pid_file = _get_pid_file()
 
-    # For GlobalProtect, try different cookie formats
-    # Track which cookie type we're using for --usergroup
+    print(f"[DEBUG] PID file will be: {pid_file}")
+
+    # Build cookie string (same as before)
     gp_cookie_type = None
-
-    # Check if we have a gateway IP to connect to (different from portal)
     gateway_target = cookies.pop('_gateway_ip', None) if protocol == "gp" else None
 
     if protocol == "gp":
-        # GP with SAML: prelogin-cookie from SAML response
-        # Based on gp-saml-gui working command:
-        # - Use --usergroup=portal:prelogin-cookie (portal mode, not gateway)
-        # - Pass cookie via --passwd-on-stdin (not --cookie)
-        # - Use --useragent='PAN GlobalProtect'
-        # - Use --os=linux-64
-
-        # Use cached usergroup if available (e.g., portal:portal-userauthcookie)
-        # This means we have a long-lived cookie from a previous connection
         if cached_usergroup:
             print(f"  Using cached usergroup: {cached_usergroup}")
             gp_cookie_type = cached_usergroup
-            # Get the cookie value - try portal-userauthcookie first if usergroup suggests it
             if 'portal-userauthcookie' in cookies:
                 cookie_str = cookies['portal-userauthcookie']
-                print(f"  Using portal-userauthcookie (long-lived)")
             elif 'prelogin-cookie' in cookies:
                 cookie_str = cookies['prelogin-cookie']
-                print(f"  Using prelogin-cookie")
             else:
                 cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
-                print(f"  Using combined cookies")
         elif 'prelogin-cookie' in cookies:
             cookie_str = cookies['prelogin-cookie']
-            # Portal mode with prelogin-cookie (matches gp-saml-gui)
             gp_cookie_type = 'portal:prelogin-cookie'
-            print(f"  Using prelogin-cookie (portal mode)")
         elif 'portal-userauthcookie' in cookies:
             cookie_str = cookies['portal-userauthcookie']
-            # Portal mode with portal-userauthcookie (long-lived)
             gp_cookie_type = 'portal:portal-userauthcookie'
-            print(f"  Using portal-userauthcookie (portal mode)")
         elif 'SAMLResponse' in cookies:
-            # SAMLResponse as fallback - this is what we POST to VPN, not ideal
             cookie_str = cookies['SAMLResponse']
-            gp_cookie_type = 'prelogin-cookie'  # Try as prelogin-cookie
-            print(f"  Using SAMLResponse ({len(cookie_str)} chars) - may not work")
+            gp_cookie_type = 'prelogin-cookie'
         elif 'SESSID' in cookies:
             cookie_str = cookies['SESSID']
-            gp_cookie_type = 'portal-userauthcookie'  # SESSID is portal session
-            print(f"  Using SESSID - may not work for GP SAML")
+            gp_cookie_type = 'portal-userauthcookie'
         else:
-            # Fallback to all cookies in name=value format
             cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
             gp_cookie_type = 'portal-userauthcookie'
-            print(f"  Using combined cookies")
     else:
-        # AnyConnect uses name=value format
         cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
 
-    # For GP portal mode, always use the portal hostname (not gateway IP)
-    # OpenConnect handles the portal→gateway flow automatically
     connect_target = vpn_server
-
-    # For GP with SAML, use --passwd-on-stdin to pass cookie (like gp-saml-gui)
     use_stdin_cookie = protocol == "gp" and 'prelogin-cookie' in cookies
 
+    # Build command with --background and --pid-file
     if use_stdin_cookie:
         cmd = [
             "openconnect",
+            "--background",
+            f"--pid-file={pid_file}",
             "--verbose",
             f"--protocol={proto_flag}",
             "--passwd-on-stdin",
@@ -1200,160 +1173,154 @@ def connect_vpn(vpn_server, protocol, cookies, no_dtls=False, username=None, all
     else:
         cmd = [
             "openconnect",
+            "--background",
+            f"--pid-file={pid_file}",
             "--verbose",
             f"--protocol={proto_flag}",
             f"--cookie={cookie_str}",
             connect_target,
         ]
 
-    # Add username and usergroup for GlobalProtect
+    # Add protocol-specific options
     if protocol == "gp":
-        # GP needs --os parameter and useragent for proper identification
-        # Using linux-64 and 'PAN GlobalProtect' as per gp-saml-gui
-        cmd.insert(2, "--os=linux-64")
-        cmd.insert(2, "--useragent=PAN GlobalProtect")
+        cmd.insert(4, "--os=linux-64")
+        cmd.insert(4, "--useragent=PAN GlobalProtect")
         if username:
-            cmd.insert(2, f"--user={username}")
-        # For GP SAML, specify the cookie type we're using
+            cmd.insert(4, f"--user={username}")
         if gp_cookie_type:
-            cmd.insert(2, f"--usergroup={gp_cookie_type}")
+            cmd.insert(4, f"--usergroup={gp_cookie_type}")
 
     if no_dtls:
-        cmd.insert(2, "--no-dtls")
+        cmd.insert(4, "--no-dtls")
 
-    display_cmd = f"openconnect --verbose --protocol={proto_flag}"
-    if no_dtls:
-        display_cmd += " --no-dtls"
-    if protocol == "gp":
-        display_cmd += " --useragent='PAN GlobalProtect' --os=linux-64"
-        if gp_cookie_type:
-            display_cmd += f" --usergroup={gp_cookie_type}"
-        if username:
-            display_cmd += f" --user={username}"
-    if use_stdin_cookie:
-        display_cmd += f" --passwd-on-stdin {connect_target}"
-        print(f"  Running: echo '<cookie>' | {display_cmd}")
-        # Debug: show cookie length and first/last chars
-        print(f"    [DEBUG] Cookie length: {len(cookie_str)}, starts: {cookie_str[:20]}..., ends: ...{cookie_str[-10:]}")
-    else:
-        display_cmd += f" --cookie=<session> {connect_target}"
-        print(f"  Running: {display_cmd}")
-    print()
+    print(f"[DEBUG] Command: {' '.join(cmd[:6])}... (truncated)")
+    print(f"[DEBUG] use_stdin_cookie: {use_stdin_cookie}")
 
-    if use_stdin_cookie:
-        # Write cookie to named file for manual verification
-        cookie_file = '/tmp/gp_cookie.txt'
-        print(f"    [DEBUG] Writing cookie to {cookie_file}")
-        with open(cookie_file, 'w') as f:
-            f.write(cookie_str)
-            f.write('\n')  # Newline required for openconnect stdin
+    if sys.platform == "darwin":
+        # Write cookie to temp file for stdin
+        if use_stdin_cookie:
+            cookie_file = '/tmp/gp_cookie.txt'
+            with open(cookie_file, 'w') as f:
+                f.write(cookie_str + '\n')
+            print(f"[DEBUG] Wrote cookie to {cookie_file}")
 
-        # Properly quote command arguments for shell
-        cmd_quoted = shlex.join(cmd)
-
-        # Print manual command for testing
-        print(f"\n    [DEBUG] MANUAL TEST: Run this command yourself:")
-        print(f"    echo {shlex.quote(cookie_str)} | sudo {cmd_quoted}")
-        print()
-
-        # Determine privilege escalation command
-        if use_pkexec:
-            # pkexec for GUI mode - no need to cache credentials, polkit handles it
-            priv_cmd = ["pkexec"] + cmd
-            print(f"    [DEBUG] Using pkexec for privilege escalation (GUI mode)...")
+            # Build command string for osascript
+            cmd_str = shlex.join(cmd)
+            shell_cmd = f"cat {cookie_file} | {cmd_str}"
         else:
-            # IMPORTANT: Cache sudo credentials BEFORE redirecting stdin
-            # Otherwise sudo will try to read password from the cookie file!
-            print(f"    [DEBUG] Caching sudo credentials (required before stdin redirect)...")
-            subprocess.run(["sudo", "-v"], check=True)
-            priv_cmd = ["sudo"] + cmd
+            cmd_str = shlex.join(cmd)
+            shell_cmd = cmd_str
 
-        # Use subprocess with os.pipe() for stdin and stdout capture
-        # This allows us to:
-        # 1. Pass cookie via stdin
-        # 2. Capture stdout to look for portal-userauthcookie (long-lived cookie)
-        # 3. Return on failure (allow_fallback)
-        print(f"    [DEBUG] Using subprocess with pipe (captures stdout for portal-userauthcookie)...")
+        print(f"[DEBUG] Running via osascript: {shell_cmd[:80]}...")
 
-        # Create pipe for stdin
-        read_fd, write_fd = os.pipe()
-        cookie_bytes = (cookie_str + '\n').encode()
-        os.write(write_fd, cookie_bytes)
-        os.close(write_fd)  # Close write end to signal EOF
-
-        # Run openconnect with stdin from pipe and stdout captured
-        process = subprocess.Popen(
-            priv_cmd,
-            stdin=read_fd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,  # Combine stderr with stdout
-            text=True,
-            bufsize=1,  # Line-buffered
+        # Use osascript to run with admin privileges
+        script = f'do shell script "{shell_cmd}" with administrator privileges'
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True
         )
-        os.close(read_fd)  # Close our copy of read end
 
-        # Read stdout line by line, print to terminal, and look for portal-userauthcookie
-        portal_cookie = None
-        try:
-            for line in process.stdout:
-                # Print line to terminal (user can see what's happening)
-                print(line, end='')
+        print(f"[DEBUG] osascript returncode: {result.returncode}")
+        print(f"[DEBUG] osascript stdout: {result.stdout[:200] if result.stdout else 'empty'}")
+        print(f"[DEBUG] osascript stderr: {result.stderr[:200] if result.stderr else 'empty'}")
 
-                # Look for portal-userauthcookie in output
-                # OpenConnect outputs: "GlobalProtect login returned portal-userauthcookie=XXX"
-                if 'portal-userauthcookie=' in line and protocol == "gp":
-                    # Extract cookie value
-                    match = re.search(r'portal-userauthcookie=(\S+)', line)
-                    if match:
-                        portal_cookie = match.group(1)
-                        if portal_cookie.lower() != 'empty':
-                            print(f"\n    [DEBUG] Captured portal-userauthcookie: {portal_cookie[:20]}...")
-        except KeyboardInterrupt:
-            # User pressed Ctrl+C, terminate openconnect gracefully
-            process.terminate()
-
-        returncode = process.wait()
-
-        # If we got a portal-userauthcookie, update the cache with this long-lived cookie
-        if portal_cookie and connection_name and portal_cookie.lower() != 'empty':
-            print(f"\n{GREEN}Updating cache with long-lived portal-userauthcookie...{NC}")
-            new_cookies = {'portal-userauthcookie': portal_cookie}
-            store_cookies(connection_name, new_cookies, usergroup='portal:portal-userauthcookie')
-    else:
-        # Use sudo/pkexec for openconnect since we're running as normal user
-        if use_pkexec:
-            if sys.platform == "darwin":
-                # macOS: use osascript for GUI sudo prompt
-                cmd_str = shlex.join(cmd)
-                osa_script = f'do shell script "{cmd_str}" with administrator privileges'
-                priv_cmd = ["osascript", "-e", osa_script]
-            else:
-                priv_cmd = ["pkexec"] + cmd
+        # Check if PID file was created
+        time.sleep(1)
+        if os.path.exists(pid_file):
+            with open(pid_file) as f:
+                pid = f.read().strip()
+            print(f"[DEBUG] openconnect started with PID: {pid}")
+            return True
         else:
-            priv_cmd = ["sudo"] + cmd
-        process = subprocess.Popen(priv_cmd)
-        returncode = process.wait()
+            print(f"[DEBUG] PID file not created - connection may have failed")
+            return False
+    else:
+        # Linux - use pkexec
+        if use_stdin_cookie:
+            cookie_file = '/tmp/gp_cookie.txt'
+            with open(cookie_file, 'w') as f:
+                f.write(cookie_str + '\n')
+            shell_cmd = f"cat {cookie_file} | {shlex.join(cmd)}"
+            result = subprocess.run(
+                ["pkexec", "sh", "-c", shell_cmd],
+                capture_output=True,
+                text=True
+            )
+        else:
+            result = subprocess.run(
+                ["pkexec"] + cmd,
+                capture_output=True,
+                text=True
+            )
 
-    if returncode != 0:
-        print(f"\n{YELLOW}Connection failed (exit code {returncode}).{NC}")
-        return False
-    return True
+        time.sleep(1)
+        if os.path.exists(pid_file):
+            with open(pid_file) as f:
+                pid = f.read().strip()
+            print(f"[DEBUG] openconnect started with PID: {pid}")
+            return True
+        else:
+            print(f"[DEBUG] PID file not created")
+            return False
 
 
 def disconnect(force=False):
-    """Kill any running openconnect process."""
-    signal_flag = "-TERM"
-    # Use sudo since openconnect runs as root
-    result = subprocess.run(["sudo", "pkill", signal_flag, "-f", "openconnect"], capture_output=True)
-    if result.returncode == 0:
-        if force:
-            clear_stored_cookies()
-            print(f"{GREEN}VPN disconnected and session terminated.{NC}")
-        else:
-            print(f"{GREEN}VPN disconnected (session kept alive for reconnect).{NC}")
-    else:
-        print(f"{YELLOW}No active VPN connection found.{NC}")
+    """Disconnect by reading PID file and sending SIGINT."""
+    import time
 
+    pid_file = _get_pid_file()
+    print(f"[DEBUG] disconnect called, looking for PID file: {pid_file}")
+
+    # Check if PID file exists
+    if not os.path.exists(pid_file):
+        print(f"[DEBUG] No PID file found, checking if openconnect is running...")
+        result = subprocess.run(["pgrep", "-x", "openconnect"], capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"{YELLOW}No active VPN connection found.{NC}")
+            return
+        else:
+            # Fallback: use pgrep result
+            pid = result.stdout.strip().split('\n')[0]
+            print(f"[DEBUG] Found openconnect via pgrep, PID: {pid}")
+    else:
+        with open(pid_file) as f:
+            pid = f.read().strip()
+        print(f"[DEBUG] Read PID from file: {pid}")
+
+    # Send SIGINT via osascript (macOS) or pkexec (Linux)
+    if sys.platform == "darwin":
+        print(f"[DEBUG] Sending kill -INT {pid} via osascript...")
+        script = f'do shell script "kill -INT {pid}" with administrator privileges'
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True
+        )
+        print(f"[DEBUG] osascript result: {result.returncode}")
+    else:
+        print(f"[DEBUG] Sending kill -INT {pid} via pkexec...")
+        subprocess.run(["pkexec", "kill", "-INT", pid])
+
+    # Wait for process to exit
+    print(f"[DEBUG] Waiting for openconnect to exit...")
+    for i in range(10):
+        time.sleep(0.5)
+        check = subprocess.run(["pgrep", "-x", "openconnect"], capture_output=True)
+        if check.returncode != 0:
+            print(f"[DEBUG] openconnect exited after {(i+1)*0.5}s")
+            break
+
+    # Clean up PID file
+    if os.path.exists(pid_file):
+        os.remove(pid_file)
+        print(f"[DEBUG] Removed PID file")
+
+    if force:
+        clear_stored_cookies()
+        print(f"{GREEN}VPN disconnected and session terminated.{NC}")
+    else:
+        print(f"{GREEN}VPN disconnected (session kept alive for reconnect).{NC}")
 
 def main():
     parser = argparse.ArgumentParser(

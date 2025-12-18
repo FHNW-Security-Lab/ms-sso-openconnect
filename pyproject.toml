@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ms-sso-openconnect"
+version = "2.0.0"
+description = "VPN client with Microsoft SSO for AnyConnect and GlobalProtect"
+requires-python = ">=3.12"
+dependencies = [
+    "keyring>=24.3.0",
+    "pyotp>=2.9.0",
+    "playwright>=1.57.0",
+    "platformdirs>=3.11.0",
+    "psutil>=7.1.0",
+    "PyQt6>=6.10.0",
+    "secretstorage>=3.5.0; sys_platform == 'linux'",
+]
+
+[project.scripts]
+ms-sso-openconnect = "cli.main:main"
+ms-sso-openconnect-daemon = "daemon.server:main"
+ms-sso-openconnect-ui = "gui.app:main"
+
+[tool.setuptools]
+packages = ["core", "daemon", "cli", "gui"]
+
+[tool.setuptools.package-data]
+gui = ["resources/icons/*"]
