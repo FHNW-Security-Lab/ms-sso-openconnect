@@ -16,6 +16,7 @@ import threading
 import time
 from typing import Optional
 
+from daemon.validator import validate_request
 from .platform import (
     get_socket_path,
     get_pid_file,
@@ -123,9 +124,23 @@ class VPNDaemon:
             if not data:
                 return
 
-            request = json.loads(data)
-            command = request.get("command")
+            try:
+                request = json.loads(data)
+            except json.JSONDecodeError as e:
+                log.error(f"Invalid JSON: {e}")
+                conn.send(json.dumps({"success": False, "error": "Invalid JSON"}).encode())
+                return
 
+            #################################
+            # INPUT VALIDATION / SANITIZING #
+            #################################
+            valid, error = validate_request(request)
+            if not valid:
+                log.warning(f"Invalid request: {error}")
+                conn.send(json.dumps({"success": False, "error": error}).encode())
+                return
+
+            command = request.get("command")
             log.info(f"Received command: {command}")
 
             with self._lock:
@@ -137,14 +152,9 @@ class VPNDaemon:
                     response = self._cmd_status()
                 elif command == "output":
                     response = self._cmd_output()
-                else:
-                    response = {"success": False, "error": f"Unknown command: {command}"}
 
             conn.send(json.dumps(response).encode("utf-8"))
 
-        except json.JSONDecodeError as e:
-            log.error(f"Invalid JSON: {e}")
-            conn.send(json.dumps({"success": False, "error": "Invalid JSON"}).encode())
         except Exception as e:
             log.error(f"Connection handler error: {e}")
             try:

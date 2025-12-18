@@ -104,7 +104,8 @@ class ConnectWorker(QObject):
                 return
 
             # Store cookies
-            store_cookies(name, cookies, usergroup="portal:prelogin-cookie")
+            if protocol != "gp":
+                store_cookies(name, cookies, usergroup="portal:prelogin-cookie")
 
             # Connect
             self.progress.emit(f"Connecting to {address}...")
