@@ -85,6 +85,7 @@ def do_saml_auth(
         gp_prelogin_cookie, gp_saml_request, gp_gateway_ip = _get_gp_prelogin(vpn_server, debug)
     # Ensure Playwright uses real user's browser cache
     real_user = os.environ.get("SUDO_USER", os.environ.get("USER", "root"))
+    home = os.path.expanduser("~")
     if real_user != "root":
         try:
             import pwd
@@ -94,15 +95,18 @@ def do_saml_auth(
             pass
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=headless,
-            args=["--no-sandbox", "--disable-dev-shm-usage"]
-        )
+        # Persistent context for SSO session reuse
+        cache_dir = os.path.join(home, ".cache", "ms-sso-openconnect", "browser-session")
+        os.makedirs(cache_dir, exist_ok=True)
 
-        context = browser.new_context(
+        context = p.chromium.launch_persistent_context(
+            cache_dir,
+            headless=headless,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         )
-        page = context.new_page()
+
+        page = context.pages[0] if context.pages else context.new_page()
 
         # Capture SAML response
         saml_result = {
@@ -153,47 +157,52 @@ def do_saml_auth(
                 start_url = vpn_url
 
             # Step 1: Open portal
-            page.goto(start_url, timeout=30000, wait_until="domcontentloaded")
+            page.goto(start_url, timeout=30000, wait_until="networkidle")
+            print(f"[DEBUG] Current URL: {page.url}")
             if debug:
                 page.screenshot(path="/tmp/vpn-1-portal.png")
 
-            # Step 2: Enter username
-            page.wait_for_selector('input[name="loginfmt"]', timeout=10000)
-            page.fill('input[name="loginfmt"]', username)
-            time.sleep(0.5)
-            _click_submit(page)
-            page.wait_for_load_state("domcontentloaded")
+            login_form = page.locator('input[name="loginfmt"]')
+            if login_form.count() > 0:
+                print("[DEBUG] FOUND LOGIN FORM, GOING TO FILL IT")
 
-            # Step 3: Enter password
-            password_field = _wait_for_password_field(page, debug)
-            if not password_field:
-                raise Exception("Password field not found")
+                # Step 2: Enter username
+                #page.wait_for_selector('input[name="loginfmt"]', timeout=10000)
+                page.fill('input[name="loginfmt"]', username)
+                time.sleep(0.5)
+                _click_submit(page)
+                page.wait_for_load_state("domcontentloaded")
 
-            password_field.fill(password)
-            time.sleep(0.5)
-            if debug:
-                page.screenshot(path="/tmp/vpn-3-password.png")
-            _click_submit(page)
-            page.wait_for_load_state("domcontentloaded")
+                # Step 3: Enter password
+                password_field = _wait_for_password_field(page, debug)
+                if not password_field:
+                    raise Exception("Password field not found")
 
-            # Step 4: 2FA
-            time.sleep(3)
-            _handle_2fa(page, totp_secret, debug)
+                password_field.fill(password)
+                time.sleep(0.5)
+                if debug:
+                    page.screenshot(path="/tmp/vpn-3-password.png")
+                _click_submit(page)
+                page.wait_for_load_state("domcontentloaded")
 
-            # Step 5: "Stay signed in?"
-            try:
-                page.wait_for_selector("#idSIButton9", timeout=8000)
-                page.click("#idSIButton9")
-            except PWTimeout:
-                pass
+                # Step 4: 2FA
+                time.sleep(3)
+                _handle_2fa(page, totp_secret, debug)
 
-            page.wait_for_load_state("domcontentloaded")
+                # Step 5: "Stay signed in?"
+                try:
+                    page.wait_for_selector("#idSIButton9", timeout=8000)
+                    page.click("#idSIButton9")
+                except PWTimeout:
+                    pass
 
-            # Step 6: Get cookies
-            try:
-                page.wait_for_url(f"**{vpn_server}**", timeout=15000)
-            except PWTimeout:
-                pass
+                page.wait_for_load_state("domcontentloaded")
+
+                # Step 6: Get cookies
+                try:
+                    page.wait_for_url(f"**{vpn_server}**", timeout=15000)
+                except PWTimeout:
+                    pass
 
             time.sleep(0.5)
             cookies = context.cookies()
@@ -225,7 +234,7 @@ def do_saml_auth(
             if gp_gateway_ip:
                 vpn_cookies["_gateway_ip"] = gp_gateway_ip
 
-            browser.close()
+            context.close()
             return vpn_cookies if vpn_cookies else None
 
         except Exception as e:
@@ -234,7 +243,7 @@ def do_saml_auth(
                     page.screenshot(path="/tmp/vpn-error.png")
                 except Exception:
                     pass
-            browser.close()
+            context.close()
             raise
 
 

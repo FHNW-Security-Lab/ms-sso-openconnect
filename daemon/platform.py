@@ -104,18 +104,14 @@ def kill_process(pid: int, timeout: float = 10.0) -> bool:
         return True  # Already dead
 
     try:
-        # First try graceful termination
-        proc.terminate()  # SIGTERM on Unix, TerminateProcess on Windows
+        # kill() to avoid sending a "goodbye" to the vpn server to keep session cookie alive
+        # however, this breaks macOS networking so we use terminate() instead... cookie will be invalid.
+        #proc.kill()  # SIGKILL on Unix
+        proc.terminate()
         proc.wait(timeout=timeout)
         return True
     except psutil.TimeoutExpired:
-        # Force kill
-        try:
-            proc.kill()  # SIGKILL on Unix
-            proc.wait(timeout=3)
-            return True
-        except Exception:
-            return False
+        return False
     except psutil.NoSuchProcess:
         return True
     except Exception:
