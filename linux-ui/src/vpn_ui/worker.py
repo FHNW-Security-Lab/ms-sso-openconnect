@@ -100,6 +100,7 @@ class VPNConnectWorker(QObject):
                 username=username,
                 password=password,
                 totp_secret=totp_secret,
+                protocol=protocol,
                 headless=not self.visible,
                 debug=self.debug
             )

@@ -212,6 +212,7 @@ class VPNBackend:
         username: str,
         password: str,
         totp_secret: str,
+        protocol: str = "anyconnect",
         headless: bool = True,
         debug: bool = False
     ) -> Optional[dict]:
@@ -222,6 +223,7 @@ class VPNBackend:
             username: Login username
             password: Login password
             totp_secret: TOTP secret for 2FA (will auto-generate codes)
+            protocol: VPN protocol ('anyconnect' or 'gp')
             headless: Run browser in headless mode
             debug: Enable debug output
 
@@ -235,7 +237,8 @@ class VPNBackend:
             totp_secret,
             auto_totp=True,
             headless=headless,
-            debug=debug
+            debug=debug,
+            protocol=protocol
         )
 
     # VPN Connection
