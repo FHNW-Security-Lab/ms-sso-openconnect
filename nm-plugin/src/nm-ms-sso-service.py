@@ -396,11 +396,14 @@ class VPNPluginService(dbus.service.Object):
             for attempt in range(max_attempts):
                 log.info(f"Connection attempt {attempt + 1}/{max_attempts}")
 
-                # Try cached cookies first (only on first attempt)
+                # Try cached cookies first (only on first attempt, not for GlobalProtect)
+                # GlobalProtect prelogin-cookie has very short TTL, so always re-auth
                 cookies = None
                 used_cache = False
 
-                if attempt == 0:
+                if attempt == 0 and protocol == 'gp':
+                    log.info("GlobalProtect: skipping cookie cache (short TTL)")
+                elif attempt == 0:
                     log.debug("Checking for cached cookies...")
                     cached = get_nm_stored_cookies(connection_name, max_age_hours=12)
                     if cached:
@@ -479,8 +482,9 @@ class VPNPluginService(dbus.service.Object):
                     if not cookies:
                         raise Exception("SAML authentication returned no cookies")
 
-                    # Store fresh cookies using NM-specific storage
-                    store_nm_cookies(connection_name, cookies, usergroup='portal:prelogin-cookie')
+                    # Store fresh cookies using NM-specific storage (skip GlobalProtect - short TTL)
+                    if protocol != 'gp':
+                        store_nm_cookies(connection_name, cookies, usergroup='portal:prelogin-cookie')
 
                 # Try to connect with these cookies
                 success, error_msg = self._attempt_vpn_connection(gateway, protocol, cookies, username)
