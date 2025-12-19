@@ -132,25 +132,44 @@ def do_saml_auth(
         }
 
         def handle_request(request):
-            if vpn_server in request.url and request.post_data:
-                try:
-                    params = urllib.parse.parse_qs(request.post_data)
-                    if "SAMLResponse" in params:
-                        saml_result["saml_response"] = params["SAMLResponse"][0]
-                    if "prelogin-cookie" in params:
-                        saml_result["prelogin_cookie"] = params["prelogin-cookie"][0]
-                except Exception:
-                    pass
+            if vpn_server in request.url:
+                if debug:
+                    print(f"    [DEBUG] Request to VPN: {request.url[:80]}...")
+                if request.post_data:
+                    try:
+                        params = urllib.parse.parse_qs(request.post_data)
+                        if debug:
+                            print(f"    [DEBUG] POST params: {list(params.keys())}")
+                        if "SAMLResponse" in params:
+                            saml_result["saml_response"] = params["SAMLResponse"][0]
+                            if debug:
+                                print(f"    [DEBUG] Captured SAMLResponse ({len(saml_result['saml_response'])} chars)")
+                        if "prelogin-cookie" in params:
+                            saml_result["prelogin_cookie"] = params["prelogin-cookie"][0]
+                            if debug:
+                                print(f"    [DEBUG] Captured prelogin-cookie from POST")
+                    except Exception as e:
+                        if debug:
+                            print(f"    [DEBUG] Error parsing POST: {e}")
 
         def handle_response(response):
             if vpn_server not in response.url:
                 return
             try:
                 headers = response.headers
+                if debug:
+                    print(f"    [DEBUG] Response from VPN: {response.url[:80]}... status={response.status}")
+                    # Log GP-related headers
+                    for h in ["prelogin-cookie", "saml-username", "portal-userauthcookie", "set-cookie"]:
+                        if h in headers:
+                            val = headers[h][:50] if len(headers[h]) > 50 else headers[h]
+                            print(f"    [DEBUG] Header {h}: {val}...")
                 if "prelogin-cookie" in headers:
                     saml_result["prelogin_cookie"] = headers["prelogin-cookie"]
                 if "saml-username" in headers:
                     saml_result["saml_username"] = headers["saml-username"]
+                if "portal-userauthcookie" in headers:
+                    saml_result["portal_userauthcookie"] = headers["portal-userauthcookie"]
             except Exception:
                 pass
 
@@ -209,6 +228,53 @@ def do_saml_auth(
                     if gp_prelogin_cookie and 'prelogin-cookie' not in session_cookies:
                         session_cookies['prelogin-cookie'] = gp_prelogin_cookie
                     return session_cookies
+
+            # Handle "Pick an account" screen (when multiple accounts are cached)
+            pick_account_text = page.locator('text="Pick an account"')
+            if pick_account_text.count() > 0:
+                if debug:
+                    print("    [DEBUG] Detected account picker screen")
+                    page.screenshot(path="/tmp/vpn-step1b-accountpicker.png")
+
+                # Check if the desired username is already listed
+                username_email = username.lower()
+                account_tile = page.locator(f'small:text-is("{username_email}")')
+
+                if account_tile.count() > 0:
+                    print(f"  [2/6] Selecting existing account: {username}")
+                    # Click the parent div of the email text
+                    account_tile.first.click()
+                    page.wait_for_load_state("domcontentloaded")
+                    time.sleep(2)
+                else:
+                    # Click "Use another account" - try multiple selectors
+                    print("  [2/6] Clicking 'Use another account'...")
+                    other_selectors = [
+                        'div[data-test-id="otherTile"]',
+                        '#otherTile',
+                        'div:has-text("Use another account")',
+                        'text="Use another account"',
+                    ]
+                    clicked = False
+                    for sel in other_selectors:
+                        try:
+                            elem = page.locator(sel)
+                            if elem.count() > 0 and elem.first.is_visible():
+                                elem.first.click(force=True)
+                                clicked = True
+                                if debug:
+                                    print(f"    [DEBUG] Clicked: {sel}")
+                                break
+                        except Exception as e:
+                            if debug:
+                                print(f"    [DEBUG] Failed to click {sel}: {e}")
+                            continue
+
+                    if clicked:
+                        page.wait_for_load_state("domcontentloaded")
+                        time.sleep(2)
+                        if debug:
+                            page.screenshot(path="/tmp/vpn-step1c-otheraccount.png")
 
             # Check if login form is present
             login_form = page.locator('input[name="loginfmt"]')
@@ -345,6 +411,12 @@ def do_saml_auth(
             time.sleep(0.5)
             cookies = context.cookies()
 
+            if debug:
+                print(f"    [DEBUG] Browser cookies ({len(cookies)} total):")
+                for c in cookies:
+                    if vpn_server in c.get("domain", ""):
+                        print(f"      - {c['name']}: {str(c['value'])[:30]}... (domain={c.get('domain')})")
+
             # Filter VPN cookies
             vpn_cookies = {}
             gp_names = ["portal-userauthcookie", "portal-prelogonuserauthcookie", "user", "prelogin-cookie"]
@@ -371,6 +443,14 @@ def do_saml_auth(
                 vpn_cookies["prelogin-cookie"] = gp_prelogin_cookie
             if gp_gateway_ip:
                 vpn_cookies["_gateway_ip"] = gp_gateway_ip
+
+            if debug:
+                print(f"    [DEBUG] Final VPN cookies to return:")
+                for k, v in vpn_cookies.items():
+                    print(f"      - {k}: {str(v)[:40]}...")
+                print(f"    [DEBUG] saml_result: prelogin={saml_result['prelogin_cookie'] is not None}, "
+                      f"saml_response={saml_result['saml_response'] is not None}, "
+                      f"portal_userauthcookie={saml_result['portal_userauthcookie'] is not None}")
 
             context.close()
             return vpn_cookies if vpn_cookies else None
