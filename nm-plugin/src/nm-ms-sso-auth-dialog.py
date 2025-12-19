@@ -11,8 +11,7 @@ It can either:
 import os
 import sys
 import argparse
-import json
-import importlib.util
+from pathlib import Path
 
 import gi
 gi.require_version('Gtk', '4.0')
@@ -20,30 +19,43 @@ gi.require_version('Adw', '1')
 from gi.repository import Gtk, Adw, GLib
 
 
-def find_vpn_core_module():
-    """Find the ms-sso-openconnect.py module."""
-    search_paths = [
-        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "ms-sso-openconnect.py"),
-        "/usr/share/ms-sso-openconnect/ms-sso-openconnect.py",
-        "/usr/lib/ms-sso-openconnect/ms-sso-openconnect.py",
-        "/opt/ms-sso-vpn/ms-sso-openconnect.py",
+def _setup_core_module():
+    """Add core module to path if not already importable."""
+    try:
+        import core
+        return
+    except ImportError:
+        pass
+
+    # Development: nm-plugin/src/nm-ms-sso-auth-dialog.py -> ../../ -> project root
+    project_root = Path(__file__).parent.parent.parent
+    if project_root.exists() and (project_root / "core").exists():
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
+        return
+
+    # System installation paths
+    system_paths = [
+        Path("/usr/share/ms-sso-openconnect"),
+        Path("/usr/lib/ms-sso-openconnect"),
+        Path("/opt/ms-sso-vpn"),
     ]
-    for path in search_paths:
-        if os.path.exists(path):
-            return path
-    return None
+    for path in system_paths:
+        if (path / "core").exists():
+            if str(path) not in sys.path:
+                sys.path.insert(0, str(path))
+            return
 
 
-def load_vpn_core():
-    """Load the VPN core module."""
-    module_path = find_vpn_core_module()
-    if not module_path:
-        return None
+# Setup core module on import
+_setup_core_module()
 
-    spec = importlib.util.spec_from_file_location("vpn_core", module_path)
-    vpn_core = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(vpn_core)
-    return vpn_core
+# Import from core module
+try:
+    from core import get_all_connections
+    CORE_AVAILABLE = True
+except ImportError:
+    CORE_AVAILABLE = False
 
 
 class AuthDialog(Adw.ApplicationWindow):
@@ -206,12 +218,11 @@ def output_secrets(secrets):
 
 def lookup_keyring_secrets(gateway, username):
     """Look up secrets from the shared keyring."""
-    vpn_core = load_vpn_core()
-    if not vpn_core:
+    if not CORE_AVAILABLE:
         return None
 
     try:
-        connections = vpn_core.get_all_connections()
+        connections = get_all_connections()
         for name, conn in connections.items():
             if conn.get('address') == gateway and conn.get('username') == username:
                 return {

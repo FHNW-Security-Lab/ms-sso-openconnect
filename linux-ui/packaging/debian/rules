@@ -13,8 +13,9 @@ override_dh_auto_test:
 
 override_dh_auto_install:
 	dh_auto_install
-	# Install the CLI backend tool
-	install -D -m 755 ../ms-sso-openconnect.py debian/ms-sso-openconnect-ui/usr/lib/ms-sso-openconnect/ms-sso-openconnect.py
+	# Install the core Python module directory
+	mkdir -p debian/ms-sso-openconnect-ui/usr/lib/ms-sso-openconnect/
+	cp -r ../core debian/ms-sso-openconnect-ui/usr/lib/ms-sso-openconnect/
 	# Install desktop file
 	install -D -m 644 desktop/ms-sso-openconnect-ui.desktop debian/ms-sso-openconnect-ui/usr/share/applications/ms-sso-openconnect-ui.desktop
 	# Install icons

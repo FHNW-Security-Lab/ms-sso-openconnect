@@ -5,23 +5,23 @@ NetworkManager VPN Plugin Service for MS SSO OpenConnect
 This service implements the org.freedesktop.NetworkManager.VPN.Plugin
 D-Bus interface to handle VPN connections via NetworkManager.
 
-It reuses the existing ms-sso-openconnect.py module for:
+It uses the unified core module for:
 - SAML authentication via headless browser
 - OpenConnect VPN connection
 - Keyring credential storage
 - TOTP generation
 """
 
+import json
 import os
 import sys
 import signal
 import subprocess
-import json
-import importlib.util
 import threading
 import time
 import logging
 import socket
+from pathlib import Path
 
 # Set up logging - use syslog for reliability
 log = logging.getLogger('nm-ms-sso')
@@ -60,6 +60,55 @@ import dbus
 import dbus.service
 import dbus.mainloop.glib
 
+
+def _setup_core_module():
+    """Add core module to path if not already importable."""
+    try:
+        import core
+        return
+    except ImportError:
+        pass
+
+    # Development: nm-plugin/src/nm-ms-sso-service.py -> ../../ -> project root
+    project_root = Path(__file__).parent.parent.parent
+    if project_root.exists() and (project_root / "core").exists():
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
+        return
+
+    # System installation paths
+    system_paths = [
+        Path("/usr/share/ms-sso-openconnect"),
+        Path("/usr/lib/ms-sso-openconnect"),
+        Path("/opt/ms-sso-openconnect"),
+    ]
+    for path in system_paths:
+        if (path / "core").exists():
+            if str(path) not in sys.path:
+                sys.path.insert(0, str(path))
+            return
+
+    raise ImportError(
+        "Cannot find core module. "
+        f"Searched: {project_root}, {', '.join(str(p) for p in system_paths)}"
+    )
+
+
+# Setup core module on import
+_setup_core_module()
+
+# Import from core module
+from core import (
+    do_saml_auth,
+    PROTOCOLS,
+)
+from core.cookies import (
+    store_nm_cookies,
+    get_nm_stored_cookies,
+    clear_nm_cookies,
+)
+
+
 # NetworkManager VPN Plugin D-Bus interface
 NM_VPN_DBUS_PLUGIN_PATH = "/org/freedesktop/NetworkManager/VPN/Plugin"
 NM_VPN_DBUS_PLUGIN_INTERFACE = "org.freedesktop.NetworkManager.VPN.Plugin"
@@ -80,133 +129,6 @@ NM_VPN_PLUGIN_FAILURE_CONNECT_FAILED = 1
 NM_VPN_PLUGIN_FAILURE_BAD_IP_CONFIG = 2
 
 
-def find_vpn_core_module():
-    """Find and load the ms-sso-openconnect.py module."""
-    search_paths = [
-        # Development: relative to this script
-        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "ms-sso-openconnect.py"),
-        # System install locations
-        "/usr/share/ms-sso-openconnect/ms-sso-openconnect.py",
-        "/usr/lib/ms-sso-openconnect/ms-sso-openconnect.py",
-        "/opt/ms-sso-vpn/ms-sso-openconnect.py",
-    ]
-
-    for path in search_paths:
-        if os.path.exists(path):
-            return path
-    return None
-
-
-def load_vpn_core():
-    """Load the VPN core module dynamically."""
-    module_path = find_vpn_core_module()
-    if not module_path:
-        raise RuntimeError("Cannot find ms-sso-openconnect.py module")
-
-    spec = importlib.util.spec_from_file_location("vpn_core", module_path)
-    vpn_core = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(vpn_core)
-    return vpn_core
-
-
-def get_nm_cache_dir():
-    """Get cache directory for NetworkManager plugin (system-wide)."""
-    cache_dir = "/var/cache/ms-sso-openconnect"
-    try:
-        os.makedirs(cache_dir, mode=0o755, exist_ok=True)
-    except PermissionError:
-        # Fall back to /tmp if /var/cache is not writable
-        cache_dir = "/tmp/ms-sso-openconnect-cache"
-        os.makedirs(cache_dir, mode=0o755, exist_ok=True)
-    return cache_dir
-
-
-def get_nm_cookie_file(connection_name):
-    """Get path to cookie cache file for a specific connection."""
-    cache_dir = get_nm_cache_dir()
-    # Sanitize name for filename
-    safe_name = connection_name.replace("/", "_").replace(":", "_").replace(" ", "_")
-    return os.path.join(cache_dir, f"session_{safe_name}.json")
-
-
-def store_nm_cookies(connection_name, cookies, usergroup=None):
-    """Store session cookies in a secure file (NetworkManager version)."""
-    try:
-        if not cookies:
-            log.warning("No cookies to store")
-            return False
-
-        cookie_file = get_nm_cookie_file(connection_name)
-        data = {
-            "cookies": cookies,
-            "timestamp": int(time.time())
-        }
-        if usergroup:
-            data["usergroup"] = usergroup
-
-        with open(cookie_file, 'w') as f:
-            json.dump(data, f)
-        os.chmod(cookie_file, 0o600)
-
-        log.info(f"Cookies stored to {cookie_file}")
-        log.debug(f"Stored cookie keys: {list(cookies.keys())}")
-        # Log cookie value lengths for debugging (not the actual values for security)
-        for k, v in cookies.items():
-            log.debug(f"  {k}: {len(str(v))} chars")
-        return True
-    except Exception as e:
-        log.error(f"Could not cache cookies: {e}")
-        return False
-
-
-def get_nm_stored_cookies(connection_name, max_age_hours=12):
-    """Retrieve cached session cookies from file (NetworkManager version)."""
-    try:
-        cookie_file = get_nm_cookie_file(connection_name)
-        log.debug(f"Looking for cached cookies at {cookie_file}")
-        if not os.path.exists(cookie_file):
-            log.info(f"No cached cookies at {cookie_file}")
-            return None
-
-        with open(cookie_file, 'r') as f:
-            data = json.load(f)
-
-        age_seconds = int(time.time()) - data.get("timestamp", 0)
-        if age_seconds > max_age_hours * 3600:
-            log.info(f"Cached cookies expired ({age_seconds}s old, max {max_age_hours}h)")
-            clear_nm_cookies(connection_name)
-            return None
-
-        cookies = data.get("cookies")
-        if not cookies:
-            log.warning("Cached cookie file has no cookies")
-            return None
-
-        usergroup = data.get("usergroup")
-        log.info(f"Found cached cookies ({age_seconds}s old)")
-        log.debug(f"Retrieved cookie keys: {list(cookies.keys())}")
-        # Log cookie value lengths for debugging
-        for k, v in cookies.items():
-            log.debug(f"  {k}: {len(str(v))} chars")
-        return (cookies, usergroup)
-    except Exception as e:
-        log.error(f"Error reading cached cookies: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-
-def clear_nm_cookies(connection_name):
-    """Clear cached cookies file."""
-    try:
-        cookie_file = get_nm_cookie_file(connection_name)
-        if os.path.exists(cookie_file):
-            os.remove(cookie_file)
-            log.info("Cleared cached cookies")
-    except Exception as e:
-        log.error(f"Error clearing cookies: {e}")
-
-
 class VPNPluginService(dbus.service.Object):
     """NetworkManager VPN Plugin D-Bus Service."""
 
@@ -215,7 +137,6 @@ class VPNPluginService(dbus.service.Object):
         self.state = NM_VPN_SERVICE_STATE_INIT
         self.vpn_process = None
         self.connection_thread = None
-        self.vpn_core = None
         self.mainloop = None
         self.inactivity_timeout = None
         # Store connection info for config emission
@@ -226,12 +147,7 @@ class VPNPluginService(dbus.service.Object):
         bus_name = dbus.service.BusName(NM_DBUS_SERVICE, bus=bus)
         dbus.service.Object.__init__(self, bus_name, NM_VPN_DBUS_PLUGIN_PATH)
 
-        # Load VPN core module
-        try:
-            self.vpn_core = load_vpn_core()
-            log.info(f"Loaded VPN core module")
-        except Exception as e:
-            log.info(f"Error loading VPN core: {e}")
+        log.info("Core module loaded successfully")
 
         # Set initial state
         self._set_state(NM_VPN_SERVICE_STATE_INIT)
@@ -348,10 +264,6 @@ class VPNPluginService(dbus.service.Object):
         try:
             self._reset_inactivity_timeout()
 
-            # Check if VPN core module is loaded
-            if not self.vpn_core:
-                raise Exception("VPN core module not loaded. Check if ms-sso-openconnect.py is installed.")
-
             # Extract connection parameters
             secrets = self._get_connection_secrets(settings)
             gateway = secrets['gateway']
@@ -414,7 +326,6 @@ class VPNPluginService(dbus.service.Object):
                         # Debug: write cached cookies to file for comparison
                         try:
                             with open('/tmp/nm-vpn-cached-cookies.json', 'w') as f:
-                                import json
                                 json.dump({"source": "cache", "cookies": cookies, "usergroup": usergroup}, f, indent=2)
                             log.debug(f"Cached cookies written to /tmp/nm-vpn-cached-cookies.json")
                         except Exception as e:
@@ -454,11 +365,11 @@ class VPNPluginService(dbus.service.Object):
                         log.warning(f"No playwright browser found in any of: {browser_paths}")
 
                     try:
-                        cookies = self.vpn_core.do_saml_auth(
+                        cookies = do_saml_auth(
                             vpn_server=gateway,
                             username=username,
                             password=password,
-                            totp_secret_or_code=totp_secret,
+                            totp_secret=totp_secret,
                             auto_totp=True,
                             headless=True,
                             debug=True,  # Enable debug to see screenshots
@@ -468,7 +379,6 @@ class VPNPluginService(dbus.service.Object):
                         # Debug: write fresh cookies to file for comparison
                         try:
                             with open('/tmp/nm-vpn-fresh-cookies.json', 'w') as f:
-                                import json
                                 json.dump({"source": "fresh_saml", "cookies": cookies}, f, indent=2)
                             log.debug(f"Fresh cookies written to /tmp/nm-vpn-fresh-cookies.json")
                         except Exception as e:
@@ -519,7 +429,7 @@ class VPNPluginService(dbus.service.Object):
 
             # Connect to VPN
             # We use subprocess so we can monitor and return control
-            proto_flag = self.vpn_core.PROTOCOLS.get(protocol, {}).get('flag', 'anyconnect')
+            proto_flag = PROTOCOLS.get(protocol, {}).get('flag', 'anyconnect')
 
             if protocol == 'gp' and 'prelogin-cookie' in cookies:
                 cookie_str = cookies.get('prelogin-cookie', '')

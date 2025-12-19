@@ -52,7 +52,7 @@ class VPNApplication:
                 None,
                 "Error",
                 f"Cannot find VPN backend:\n\n{e}\n\n"
-                "Please ensure ms-sso-openconnect.py is installed."
+                "Please ensure the core module is installed."
             )
             sys.exit(1)
 

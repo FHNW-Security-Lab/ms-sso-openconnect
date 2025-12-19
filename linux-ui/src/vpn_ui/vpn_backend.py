@@ -1,16 +1,14 @@
-"""Backend interface to ms-sso-openconnect.py.
+"""Backend interface to ms-sso-openconnect core module.
 
-This module dynamically imports the VPN CLI tool and provides
-a clean interface for the GUI to use.
+This module provides a clean interface for the GUI to use the unified core library.
 """
 
-import importlib.util
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 # State file for tracking active connection
 STATE_FILE = Path.home() / ".cache" / "ms-sso-openconnect-ui" / "state.json"
@@ -34,58 +32,74 @@ def _setup_system_venv():
             os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(SYSTEM_BROWSERS))
 
 
-# Setup system venv on module load
+def _setup_core_module():
+    """Add core module to path if not already importable."""
+    # Try to import core module
+    try:
+        import core
+        return
+    except ImportError:
+        pass
+
+    # Add project root to path
+    # linux-ui/src/vpn_ui/vpn_backend.py -> ../../.. -> project root
+    project_root = Path(__file__).parent.parent.parent.parent
+    if project_root.exists() and (project_root / "core").exists():
+        if str(project_root) not in sys.path:
+            sys.path.insert(0, str(project_root))
+        return
+
+    # Try system installation paths
+    system_paths = [
+        Path("/usr/share/ms-sso-openconnect"),
+        Path("/usr/lib/ms-sso-openconnect"),
+        Path.home() / ".local/share/ms-sso-openconnect",
+    ]
+    for path in system_paths:
+        if (path / "core").exists():
+            if str(path) not in sys.path:
+                sys.path.insert(0, str(path))
+            return
+
+    raise ImportError(
+        "Cannot find core module. "
+        f"Searched: {project_root}, {', '.join(str(p) for p in system_paths)}"
+    )
+
+
+# Setup on module load
 _setup_system_venv()
+_setup_core_module()
+
+# Now import from core module
+from core import (
+    # Config
+    get_all_connections,
+    get_connection,
+    save_connection,
+    delete_connection,
+    get_config,
+    PROTOCOLS,
+    # Cookies
+    store_cookies,
+    get_stored_cookies,
+    clear_stored_cookies,
+    # Auth
+    do_saml_auth,
+    # Connect
+    connect_vpn as _connect_vpn,
+    disconnect as _disconnect,
+    # TOTP
+    generate_totp,
+)
 
 
 class VPNBackend:
-    """Wrapper class for ms-sso-openconnect.py functionality."""
+    """Wrapper class for ms-sso-openconnect core functionality."""
 
     def __init__(self):
-        """Initialize the backend by loading the VPN module."""
-        self._module = self._load_vpn_module()
-
-    def _load_vpn_module(self) -> Any:
-        """Dynamically load ms-sso-openconnect.py as a module.
-
-        Returns:
-            The loaded module with all VPN functions
-
-        Raises:
-            FileNotFoundError: If the script cannot be found
-            ImportError: If the script cannot be loaded
-        """
-        # Look for the script relative to this file
-        # linux-ui/src/vpn_ui/vpn_backend.py -> ../../.. -> project root
-        project_root = Path(__file__).parent.parent.parent.parent
-        script_path = project_root / "ms-sso-openconnect.py"
-
-        if not script_path.exists():
-            # Try alternative locations
-            alt_paths = [
-                Path("/usr/share/ms-sso-openconnect/ms-sso-openconnect.py"),
-                Path("/usr/lib/ms-sso-openconnect/ms-sso-openconnect.py"),
-                Path.home() / ".local/share/ms-sso-openconnect/ms-sso-openconnect.py",
-            ]
-            for alt_path in alt_paths:
-                if alt_path.exists():
-                    script_path = alt_path
-                    break
-            else:
-                raise FileNotFoundError(
-                    f"Cannot find ms-sso-openconnect.py. "
-                    f"Searched: {project_root}, {', '.join(str(p) for p in alt_paths)}"
-                )
-
-        spec = importlib.util.spec_from_file_location("vpn_core", script_path)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"Cannot create module spec for {script_path}")
-
-        vpn_core = importlib.util.module_from_spec(spec)
-        sys.modules["vpn_core"] = vpn_core
-        spec.loader.exec_module(vpn_core)
-
-        return vpn_core
+        """Initialize the backend."""
+        pass  # No dynamic loading needed anymore
 
     # Connection Management
 
@@ -95,7 +109,7 @@ class VPNBackend:
         Returns:
             Dictionary of connection name -> connection details
         """
-        return self._module.get_all_connections()
+        return get_all_connections()
 
     def get_connection(self, name: str) -> Optional[dict]:
         """Get a specific connection by name.
@@ -106,7 +120,7 @@ class VPNBackend:
         Returns:
             Connection details dict or None if not found
         """
-        return self._module.get_connection(name)
+        return get_connection(name)
 
     def save_connection(
         self,
@@ -131,7 +145,7 @@ class VPNBackend:
             True if saved successfully
         """
         try:
-            self._module.save_connection(
+            save_connection(
                 name, address, protocol, username, password, totp_secret
             )
             return True
@@ -148,7 +162,7 @@ class VPNBackend:
             True if deleted successfully
         """
         try:
-            self._module.delete_connection(name)
+            delete_connection(name)
             return True
         except Exception:
             return False
@@ -165,7 +179,7 @@ class VPNBackend:
         Returns:
             Tuple of (cookies_dict, usergroup) or None if not cached/expired
         """
-        return self._module.get_stored_cookies(name, max_age_hours)
+        return get_stored_cookies(name, max_age_hours)
 
     def store_cookies(
         self,
@@ -184,7 +198,7 @@ class VPNBackend:
             True if stored successfully
         """
         try:
-            self._module.store_cookies(name, cookies, usergroup)
+            store_cookies(name, cookies, usergroup)
             return True
         except Exception:
             return False
@@ -199,7 +213,7 @@ class VPNBackend:
             True if cleared successfully
         """
         try:
-            self._module.clear_stored_cookies(name)
+            clear_stored_cookies(name)
             return True
         except Exception:
             return False
@@ -230,15 +244,15 @@ class VPNBackend:
         Returns:
             Dictionary with cookies/tokens or None on failure
         """
-        return self._module.do_saml_auth(
+        return do_saml_auth(
             vpn_server,
             username,
             password,
             totp_secret,
+            protocol=protocol,
             auto_totp=True,
             headless=headless,
             debug=debug,
-            protocol=protocol
         )
 
     # VPN Connection
@@ -271,7 +285,7 @@ class VPNBackend:
         Returns:
             True if connection successful (note: may not return if using execvp)
         """
-        return self._module.connect_vpn(
+        return _connect_vpn(
             address, protocol, cookies, no_dtls, username,
             allow_fallback, connection_name, cached_usergroup, use_pkexec
         )
@@ -353,7 +367,7 @@ class VPNBackend:
         Raises:
             ValueError: If secret is invalid
         """
-        return self._module.generate_totp(secret)
+        return generate_totp(secret)
 
     def is_connected(self) -> bool:
         """Check if VPN is currently connected.
@@ -469,7 +483,7 @@ class VPNBackend:
             Tuple of (name, address, protocol, username, password, totp_secret)
             or None if not found
         """
-        return self._module.get_config(name)
+        return get_config(name)
 
 
 # Singleton instance

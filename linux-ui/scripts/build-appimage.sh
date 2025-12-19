@@ -54,8 +54,8 @@ echo "Installing Playwright Chromium..."
 PLAYWRIGHT_PATH="$(cd "$APPDIR/usr/lib/playwright" && pwd)"
 PLAYWRIGHT_BROWSERS_PATH="$PLAYWRIGHT_PATH" "$APPDIR/usr/lib/python-venv/bin/playwright" install chromium
 
-# Copy main script
-cp "$PROJECT_DIR/../ms-sso-openconnect.py" "$APPDIR/usr/lib/ms-sso-openconnect/"
+# Copy core module
+cp -r "$PROJECT_DIR/../core" "$APPDIR/usr/lib/ms-sso-openconnect/"
 
 # Copy desktop file and icon
 cp "$PROJECT_DIR/desktop/ms-sso-openconnect-ui.desktop" "$APPDIR/usr/share/applications/"

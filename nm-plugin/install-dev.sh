@@ -80,7 +80,7 @@ sudo cp "$SCRIPT_DIR/data/nm-ms-sso-service.conf" /usr/share/dbus-1/system.d/
 sudo cp "$SCRIPT_DIR/build/src/editor/libnm-vpn-plugin-ms-sso-editor.so" "$LIBDIR/"
 
 # Install core Python module
-sudo cp "$PROJECT_ROOT/ms-sso-openconnect.py" /usr/share/ms-sso-openconnect/
+sudo cp -r "$PROJECT_ROOT/core" /usr/share/ms-sso-openconnect/
 
 echo ""
 echo "Files installed:"
@@ -89,7 +89,7 @@ echo "  /usr/libexec/nm-ms-sso-auth-dialog"
 echo "  /usr/lib/NetworkManager/VPN/nm-ms-sso-service.name"
 echo "  /usr/share/dbus-1/system.d/nm-ms-sso-service.conf"
 echo "  $LIBDIR/libnm-vpn-plugin-ms-sso-editor.so"
-echo "  /usr/share/ms-sso-openconnect/ms-sso-openconnect.py"
+echo "  /usr/share/ms-sso-openconnect/core/"
 echo ""
 
 # Restart NetworkManager

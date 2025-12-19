@@ -46,7 +46,7 @@ echo "Copying source files..."
 cp -r "$SCRIPT_DIR/src" "$SRC_DIR/"
 cp -r "$SCRIPT_DIR/data" "$SRC_DIR/"
 cp "$SCRIPT_DIR/meson.build" "$SRC_DIR/"
-cp "$PROJECT_ROOT/ms-sso-openconnect.py" "$SRC_DIR/"
+cp -r "$PROJECT_ROOT/core" "$SRC_DIR/"
 
 # Copy and setup debian directory
 cp -r "$SCRIPT_DIR/packaging/debian" "$SRC_DIR/"
@@ -68,9 +68,9 @@ override_dh_auto_configure:
 
 override_dh_auto_install:
 	dh_auto_install
-	# Install the core Python module
-	install -D -m 644 ms-sso-openconnect.py \
-		debian/network-manager-ms-sso/usr/share/ms-sso-openconnect/ms-sso-openconnect.py
+	# Install the core Python module directory
+	mkdir -p debian/network-manager-ms-sso/usr/share/ms-sso-openconnect/
+	cp -r core debian/network-manager-ms-sso/usr/share/ms-sso-openconnect/
 RULES_EOF
 chmod +x "$SRC_DIR/debian/rules"
 

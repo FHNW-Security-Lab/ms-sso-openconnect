@@ -36,7 +36,7 @@ mkdir -p "$BUILD_DIR"
 # Copy source files
 echo "Copying source files..."
 cp -r "$PROJECT_DIR"/* "$BUILD_DIR/" 2>/dev/null || true
-cp -r "$PROJECT_DIR/../ms-sso-openconnect.py" "$BUILD_DIR/../" 2>/dev/null || true
+cp -r "$PROJECT_DIR/../core" "$BUILD_DIR/../" 2>/dev/null || true
 
 # Copy debian directory
 echo "Setting up debian directory..."
