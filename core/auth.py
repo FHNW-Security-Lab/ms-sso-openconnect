@@ -108,10 +108,37 @@ def do_saml_auth(
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = f"{home}/.cache/ms-playwright"
         except (KeyError, ImportError):
             pass
+    else:
+        # Running as root - check for Playwright in common locations
+        for pw_path in ["/var/cache/ms-playwright", "/opt/ms-playwright", "/usr/share/ms-playwright"]:
+            if os.path.isdir(pw_path):
+                os.environ["PLAYWRIGHT_BROWSERS_PATH"] = pw_path
+                break
 
     with sync_playwright() as p:
         # Persistent context for SSO session reuse
-        cache_dir = os.path.join(home, ".cache", "ms-sso-openconnect", "browser-session")
+        # Use appropriate cache directory based on permissions
+        if real_user != "root":
+            cache_dir = os.path.join(home, ".cache", "ms-sso-openconnect", "browser-session")
+        else:
+            # Running as root (e.g., NM plugin) - use writable system location
+            cache_dir = None
+            for base in ["/var/cache", "/tmp"]:
+                test_dir = os.path.join(base, "ms-sso-openconnect", "browser-session")
+                try:
+                    os.makedirs(test_dir, exist_ok=True)
+                    # Test if writable
+                    test_file = os.path.join(test_dir, ".write-test")
+                    with open(test_file, "w") as f:
+                        f.write("test")
+                    os.remove(test_file)
+                    cache_dir = test_dir
+                    break
+                except (OSError, IOError):
+                    continue
+            if not cache_dir:
+                # Last resort: use /tmp with a unique name
+                cache_dir = f"/tmp/ms-sso-openconnect-{os.getpid()}/browser-session"
         os.makedirs(cache_dir, exist_ok=True)
 
         context = p.chromium.launch_persistent_context(
