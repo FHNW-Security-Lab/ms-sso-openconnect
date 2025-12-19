@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ms-sso-openconnect-ui"
+version = "1.0.1"
+description = "GUI for MS SSO OpenConnect VPN client (macOS)"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "MS SSO OpenConnect Contributors"}
+]
+keywords = ["vpn", "openconnect", "microsoft", "sso", "gui", "globalprotect", "anyconnect", "macos"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: MacOS X",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet",
+    "Topic :: Security",
+]
+
+dependencies = [
+    "PyQt6>=6.5.0",
+    "keyring>=24.0.0",
+    "pyotp>=2.8.0",
+    "playwright>=1.40.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-qt>=4.2.0",
+    "black",
+    "isort",
+    "mypy",
+]
+
+[project.scripts]
+ms-sso-openconnect-ui = "vpn_ui.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"vpn_ui.resources" = ["icons/*.svg", "icons/*.png"]
+
+[tool.black]
+line-length = 100
+target-version = ['py310']
+
+[tool.isort]
+profile = "black"
+line_length = 100
