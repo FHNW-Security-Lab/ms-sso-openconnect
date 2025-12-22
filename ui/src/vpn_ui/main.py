@@ -31,7 +31,6 @@ class VPNApplication:
     def __init__(self):
         """Initialize the application."""
         self.app = QApplication(sys.argv)
-        self._configure_macos_activation_policy()
 
         # Set application metadata
         self.app.setApplicationName(APP_NAME)
@@ -75,32 +74,6 @@ class VPNApplication:
 
         # Run event loop
         return self.app.exec()
-
-    def _configure_macos_activation_policy(self) -> None:
-        """Ensure the macOS app runs as an accessory (menu bar only)."""
-        if sys.platform != "darwin":
-            return
-
-        try:
-            import ctypes
-            from ctypes import c_int, c_void_p
-
-            objc = ctypes.cdll.LoadLibrary("/usr/lib/libobjc.A.dylib")
-            objc.objc_getClass.restype = c_void_p
-            objc.sel_registerName.restype = c_void_p
-            objc.objc_msgSend.restype = c_void_p
-
-            ns_app = objc.objc_msgSend(
-                objc.objc_getClass(b"NSApplication"),
-                objc.sel_registerName(b"sharedApplication"),
-            )
-            objc.objc_msgSend(
-                ns_app,
-                objc.sel_registerName(b"setActivationPolicy:"),
-                c_int(1),
-            )
-        except Exception:
-            pass
 
     def _startup(self) -> None:
         """Initialize UI after the event loop starts."""
