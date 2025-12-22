@@ -136,8 +136,6 @@ cat > "$CONTENTS/Info.plist" << EOF
     <string>app</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
-    <key>LSUIElement</key>
-    <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSRequiresAquaSystemAppearance</key>

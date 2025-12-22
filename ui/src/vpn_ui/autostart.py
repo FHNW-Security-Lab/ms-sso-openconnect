@@ -93,7 +93,6 @@ def _create_launch_agent_plist() -> dict:
         "RunAtLoad": True,
         "KeepAlive": False,
         "ProcessType": "Interactive",
-        "LSUIElement": True,
         "StandardOutPath": str(Path.home() / "Library/Logs" / f"{APP_ID}.log"),
         "StandardErrorPath": str(Path.home() / "Library/Logs" / f"{APP_ID}.error.log"),
     }
