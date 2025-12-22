@@ -3,8 +3,7 @@
 import sys
 from typing import Optional
 
-from PyQt6.QtCore import QCoreApplication
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from vpn_ui.constants import (
@@ -62,17 +61,6 @@ class VPNApplication:
         self._settings_dialog: Optional[SettingsDialog] = None
         self._disconnecting: bool = False  # Flag to suppress errors during disconnect
 
-        # Check system tray availability
-        if not VPNTrayIcon.is_system_tray_available():
-            QMessageBox.warning(
-                None,
-                "System Tray Not Available",
-                "System tray is not available on your system.\n\n"
-                "On GNOME, you may need to install the "
-                "'gnome-shell-extension-appindicator' extension.\n\n"
-                "The application will still work but won't show a tray icon."
-            )
-
         # Create tray icon
         self.tray = VPNTrayIcon()
 
@@ -115,19 +103,43 @@ class VPNApplication:
         Returns:
             Exit code
         """
-        # Show tray icon
+        QTimer.singleShot(0, self._startup)
+
+        # Run event loop
+        return self.app.exec()
+
+    def _startup(self) -> None:
+        """Initialize UI after the event loop starts."""
+        if not VPNTrayIcon.is_system_tray_available():
+            if sys.platform == "darwin":
+                QMessageBox.warning(
+                    None,
+                    "Menu Bar Not Available",
+                    "The menu bar status area is not available.\n\n"
+                    "The application will still run but won't show a tray icon."
+                )
+            else:
+                QMessageBox.warning(
+                    None,
+                    "System Tray Not Available",
+                    "System tray is not available on your system.\n\n"
+                    "On GNOME, you may need to install the "
+                    "'gnome-shell-extension-appindicator' extension.\n\n"
+                    "The application will still work but won't show a tray icon."
+                )
+
         self.tray.show()
-
-        # Start status polling
         self.tray.start_status_polling()
+        QTimer.singleShot(1000, self._ensure_tray_visible)
 
-        # If no connections exist, show settings dialog
         connections = self.backend.get_connections()
         if not connections:
             self._show_settings()
 
-        # Run event loop
-        return self.app.exec()
+    def _ensure_tray_visible(self) -> None:
+        """Retry tray visibility to handle delayed system tray availability."""
+        if not self.tray.is_visible():
+            self.tray.show()
 
     def _update_connections_menu(self) -> None:
         """Update the connections menu in the tray."""

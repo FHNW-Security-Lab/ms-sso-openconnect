@@ -221,7 +221,8 @@ class OpenConnectHelper:
 
     def handle_disconnect(self, payload: dict) -> dict:
         force = bool(payload.get("force", False))
-        signal_flag = "-TERM" if force else "-KILL"
+        # On macOS, use SIGTERM for graceful cleanup to restore networking.
+        signal_flag = "-TERM"
 
         result = subprocess.run(
             [PKILL_PATH, signal_flag, "-x", "openconnect"], capture_output=True
