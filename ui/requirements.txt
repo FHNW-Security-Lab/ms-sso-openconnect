@@ -3,7 +3,7 @@ PyQt6>=6.5.0
 keyring>=24.0.0
 pyotp>=2.8.0
 playwright>=1.40.0
-secretstorage>=3.3.0
+secretstorage>=3.3.0; sys_platform == "linux"
 
 # Development dependencies (optional)
 # pytest>=7.0.0

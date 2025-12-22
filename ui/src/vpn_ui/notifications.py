@@ -1,7 +1,11 @@
-"""Desktop notification handler for VPN UI on macOS."""
+"""Desktop notification handler for VPN UI."""
 
 import subprocess
+import sys
+
 from PyQt6.QtWidgets import QSystemTrayIcon
+
+IS_MAC = sys.platform == "darwin"
 
 
 class NotificationManager:
@@ -15,7 +19,7 @@ class NotificationManager:
         """
         self.tray = tray_icon
         self._notifications_enabled = True
-        self._use_native = True  # Prefer native macOS notifications
+        self._use_native = IS_MAC
 
     def set_enabled(self, enabled: bool) -> None:
         """Enable or disable notifications.
@@ -66,16 +70,15 @@ class NotificationManager:
         if not self._notifications_enabled:
             return
 
-        # Try native macOS notification first
         if self._use_native:
             if self._show_native(title, message, sound=critical):
                 return
 
-        # Fallback to Qt tray notification
         icon = (
             QSystemTrayIcon.MessageIcon.Critical if critical
             else QSystemTrayIcon.MessageIcon.Information
         )
+
         self.tray.showMessage(title, message, icon, duration_ms)
 
     def connected(self, connection_name: str) -> None:

@@ -6,7 +6,7 @@ from PyQt6.QtGui import QIcon
 # Application info
 APP_NAME = "MS SSO OpenConnect"
 APP_ID = "com.github.ms-sso-openconnect-ui"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 # Paths
 RESOURCES_DIR = Path(__file__).parent / "resources"

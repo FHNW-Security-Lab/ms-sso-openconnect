@@ -1,0 +1,17 @@
+#!/bin/bash
+set -e
+
+DAEMON_PLIST="/Library/LaunchDaemons/com.github.ms-sso-openconnect-ui.helper.plist"
+
+if [ -f "$DAEMON_PLIST" ]; then
+    chown root:wheel "$DAEMON_PLIST" 2>/dev/null || true
+    chmod 644 "$DAEMON_PLIST" 2>/dev/null || true
+
+    /bin/launchctl bootstrap system "$DAEMON_PLIST" 2>/dev/null || \
+        /bin/launchctl load "$DAEMON_PLIST" 2>/dev/null || true
+
+    /bin/launchctl enable system/com.github.ms-sso-openconnect-ui.helper 2>/dev/null || true
+    /bin/launchctl kickstart -k system/com.github.ms-sso-openconnect-ui.helper 2>/dev/null || true
+fi
+
+exit 0

@@ -1,24 +1,24 @@
 # Build artifacts
 build/
 dist/
-*.app/
+/debian/
 *.egg-info/
 
-# Python
+# Python cache
 __pycache__/
-*.py[cod]
-*$py.class
-.Python
+*.pyc
+*.pyo
+
+# Virtual environment
 venv/
 .venv/
-*.egg
 
 # IDE
 .idea/
 .vscode/
 *.swp
-*.swo
-*~
 
-# macOS
-.DS_Store
+# Distribution
+*.deb
+*.AppImage
+*.pkg

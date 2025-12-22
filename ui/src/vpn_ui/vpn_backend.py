@@ -1,7 +1,6 @@
-"""Backend interface to ms-sso-openconnect core module for macOS.
+"""Backend interface to ms-sso-openconnect core module.
 
 This module provides a clean interface for the GUI to use the unified core library.
-Uses osascript for privilege escalation on macOS.
 """
 
 import json
@@ -11,15 +10,46 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+IS_MAC = sys.platform == "darwin"
+
 # State file for tracking active connection
-STATE_FILE = Path.home() / "Library" / "Application Support" / "ms-sso-openconnect" / "state.json"
+if IS_MAC:
+    STATE_FILE = (
+        Path.home()
+        / "Library"
+        / "Application Support"
+        / "ms-sso-openconnect"
+        / "state.json"
+    )
+    APP_BUNDLE_RESOURCES = Path("/Applications/MS SSO OpenConnect.app/Contents/Resources")
+    USER_APP_BUNDLE_RESOURCES = (
+        Path.home() / "Applications/MS SSO OpenConnect.app/Contents/Resources"
+    )
+else:
+    STATE_FILE = Path.home() / ".cache" / "ms-sso-openconnect-ui" / "state.json"
+    # System-installed venv paths (from Debian package postinst)
+    SYSTEM_VENV = Path("/opt/ms-sso-openconnect-ui/venv")
+    SYSTEM_BROWSERS = Path("/opt/ms-sso-openconnect-ui/browsers")
 
-# App bundle paths
-APP_BUNDLE_RESOURCES = Path("/Applications/MS SSO OpenConnect.app/Contents/Resources")
-USER_APP_BUNDLE_RESOURCES = Path.home() / "Applications/MS SSO OpenConnect.app/Contents/Resources"
+
+def _setup_system_venv() -> None:
+    """Add system venv to path if it exists (Debian package installation)."""
+    if IS_MAC:
+        return
+
+    if SYSTEM_VENV.exists():
+        # Find site-packages directory
+        for python_ver in SYSTEM_VENV.glob("lib/python*/site-packages"):
+            if python_ver.exists() and str(python_ver) not in sys.path:
+                sys.path.insert(0, str(python_ver))
+                break
+
+        # Set playwright browsers path
+        if SYSTEM_BROWSERS.exists():
+            os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(SYSTEM_BROWSERS))
 
 
-def _setup_core_module():
+def _setup_core_module() -> None:
     """Add core module to path if not already importable."""
     # Try to import core module
     try:
@@ -28,31 +58,39 @@ def _setup_core_module():
     except ImportError:
         pass
 
-    # Check app bundle resources
-    bundle_paths = [
-        APP_BUNDLE_RESOURCES,
-        USER_APP_BUNDLE_RESOURCES,
-    ]
-    for bundle in bundle_paths:
-        if (bundle / "core").exists():
-            if str(bundle) not in sys.path:
-                sys.path.insert(0, str(bundle))
-            return
+    if IS_MAC:
+        bundle_paths = [
+            APP_BUNDLE_RESOURCES,
+            USER_APP_BUNDLE_RESOURCES,
+        ]
+        for bundle in bundle_paths:
+            if (bundle / "core").exists():
+                if str(bundle) not in sys.path:
+                    sys.path.insert(0, str(bundle))
+                return
 
-    # Add project root to path (development)
-    # macos-ui/src/vpn_ui/vpn_backend.py -> ../../.. -> project root
+    # Add project root to path
+    # ui/src/vpn_ui/vpn_backend.py -> ../../.. -> project root
     project_root = Path(__file__).parent.parent.parent.parent
     if project_root.exists() and (project_root / "core").exists():
         if str(project_root) not in sys.path:
             sys.path.insert(0, str(project_root))
         return
 
-    # Try homebrew or local installation paths
-    system_paths = [
-        Path("/usr/local/share/ms-sso-openconnect"),
-        Path("/opt/homebrew/share/ms-sso-openconnect"),
-        Path.home() / ".local/share/ms-sso-openconnect",
-    ]
+    # Try system installation paths
+    if IS_MAC:
+        system_paths = [
+            Path("/usr/local/share/ms-sso-openconnect"),
+            Path("/opt/homebrew/share/ms-sso-openconnect"),
+            Path.home() / ".local/share/ms-sso-openconnect",
+        ]
+    else:
+        system_paths = [
+            Path("/usr/share/ms-sso-openconnect"),
+            Path("/usr/lib/ms-sso-openconnect"),
+            Path.home() / ".local/share/ms-sso-openconnect",
+        ]
+
     for path in system_paths:
         if (path / "core").exists():
             if str(path) not in sys.path:
@@ -66,6 +104,7 @@ def _setup_core_module():
 
 
 # Setup on module load
+_setup_system_venv()
 _setup_core_module()
 
 # Now import from core module
@@ -91,32 +130,8 @@ from core import (
 )
 
 
-def _run_as_admin(command: str) -> tuple[int, str, str]:
-    """Run a shell command with administrator privileges using osascript.
-
-    Args:
-        command: Shell command to run
-
-    Returns:
-        Tuple of (return_code, stdout, stderr)
-    """
-    script = f'do shell script "{command}" with administrator privileges'
-    try:
-        result = subprocess.run(
-            ["osascript", "-e", script],
-            capture_output=True,
-            text=True,
-            timeout=60
-        )
-        return result.returncode, result.stdout, result.stderr
-    except subprocess.TimeoutExpired:
-        return 1, "", "Command timed out"
-    except Exception as e:
-        return 1, "", str(e)
-
-
 class VPNBackend:
-    """Wrapper class for ms-sso-openconnect core functionality on macOS."""
+    """Wrapper class for ms-sso-openconnect core functionality."""
 
     def __init__(self):
         """Initialize the backend."""
@@ -288,11 +303,9 @@ class VPNBackend:
         allow_fallback: bool = False,
         connection_name: Optional[str] = None,
         cached_usergroup: Optional[str] = None,
-        use_sudo: bool = True
+        use_pkexec: bool = True
     ) -> bool:
         """Connect to VPN using openconnect.
-
-        On macOS, uses osascript to prompt for admin password.
 
         Args:
             address: VPN server address
@@ -303,22 +316,73 @@ class VPNBackend:
             allow_fallback: Allow fallback on failure
             connection_name: Connection name for cookie caching
             cached_usergroup: Usergroup from cached cookies
-            use_sudo: Use admin privileges (ignored on macOS, always uses osascript)
+            use_pkexec: Use pkexec instead of sudo (for GUI without terminal)
 
         Returns:
-            True if connection successful
+            True if connection successful (note: may not return if using execvp)
         """
-        # On macOS, we use osascript for privilege escalation
-        # The core module's connect_vpn needs to be adapted or we run openconnect directly
+        if IS_MAC:
+            return self._connect_vpn_macos(
+                address=address,
+                protocol=protocol,
+                cookies=cookies,
+                no_dtls=no_dtls,
+                username=username,
+                connection_name=connection_name,
+                cached_usergroup=cached_usergroup,
+            )
+
         return _connect_vpn(
             address, protocol, cookies, no_dtls, username,
-            allow_fallback, connection_name, cached_usergroup, use_sudo
+            allow_fallback, connection_name, cached_usergroup, use_pkexec
         )
+
+    def _connect_vpn_macos(
+        self,
+        address: str,
+        protocol: str,
+        cookies: dict,
+        no_dtls: bool,
+        username: Optional[str],
+        connection_name: Optional[str],
+        cached_usergroup: Optional[str],
+    ) -> bool:
+        from vpn_ui.macos_launchd import request_connect, request_status
+
+        response = request_connect(
+            address=address,
+            protocol=protocol,
+            cookies=cookies,
+            no_dtls=no_dtls,
+            username=username,
+            cached_usergroup=cached_usergroup,
+            connection_name=connection_name,
+        )
+
+        if not response.get("ok"):
+            raise RuntimeError(response.get("error", "Failed to connect"))
+
+        portal_cookie = response.get("portal_cookie")
+        portal_usergroup = response.get("portal_usergroup")
+        if not portal_cookie and protocol == "gp":
+            try:
+                status = request_status()
+                portal_cookie = status.get("portal_cookie")
+                portal_usergroup = status.get("portal_usergroup")
+            except Exception:
+                pass
+
+        if portal_cookie and connection_name:
+            self.store_cookies(
+                connection_name,
+                {"portal-userauthcookie": portal_cookie},
+                usergroup=portal_usergroup,
+            )
+
+        return True
 
     def disconnect(self, force: bool = False) -> bool:
         """Disconnect from VPN.
-
-        Uses osascript to run killall with admin privileges.
 
         Args:
             force: If True, send SIGTERM (terminate session).
@@ -327,21 +391,35 @@ class VPNBackend:
         Returns:
             True if disconnect signal sent
         """
-        try:
-            signal_flag = "-TERM" if force else "-KILL"
+        if IS_MAC:
+            from vpn_ui.macos_launchd import request_disconnect
 
-            # Use osascript for admin privileges on macOS
-            returncode, _, _ = _run_as_admin(f"pkill {signal_flag} -x openconnect")
-
-            if returncode == 0:
+            response = request_disconnect(force=force)
+            if response.get("ok"):
                 if force:
                     self.clear_stored_cookies()
                 return True
+            return False
 
-            # Try killall as alternative
-            returncode, _, _ = _run_as_admin(f"killall {signal_flag} openconnect")
-            return returncode == 0
-
+        try:
+            # Use pkexec for GUI (polkit) instead of sudo which needs a terminal
+            # IMPORTANT: Use -x for exact process name match, NOT -f which matches paths
+            # -f would kill our app too since it runs from a path containing "openconnect"
+            signal_flag = "-TERM" if force else "-KILL"
+            result = subprocess.run(
+                ["pkexec", "pkill", signal_flag, "-x", "openconnect"],
+                capture_output=True
+            )
+            if result.returncode == 0:
+                if force:
+                    self.clear_stored_cookies()
+                return True
+            # Try with sudo as fallback (might work if running from terminal)
+            result = subprocess.run(
+                ["sudo", "-n", "pkill", signal_flag, "-x", "openconnect"],
+                capture_output=True
+            )
+            return result.returncode == 0
         except Exception:
             return False
 
@@ -419,11 +497,19 @@ class VPNBackend:
             return None
 
         try:
-            result = subprocess.run(
-                ["pgrep", "-l", "openconnect"],
-                capture_output=True,
-                text=True
-            )
+            if IS_MAC:
+                result = subprocess.run(
+                    ["pgrep", "-l", "openconnect"],
+                    capture_output=True,
+                    text=True
+                )
+            else:
+                result = subprocess.run(
+                    ["pgrep", "-a", "-f", "openconnect"],
+                    capture_output=True,
+                    text=True
+                )
+
             if result.returncode == 0:
                 cmd_line = result.stdout.strip()
                 return {"process": cmd_line, "connected": True}
@@ -435,6 +521,9 @@ class VPNBackend:
     def infer_connection_name(self) -> Optional[str]:
         """Try to infer connection name from running openconnect process.
 
+        This is useful when the app starts and finds openconnect already
+        running (e.g., connected via CLI or app restart).
+
         Returns:
             Connection name if it can be inferred, None otherwise
         """
@@ -442,40 +531,85 @@ class VPNBackend:
             return None
 
         try:
-            # On macOS, use ps to get the full command line
+            if IS_MAC:
+                # On macOS, use ps to get the full command line
+                result = subprocess.run(
+                    ["ps", "-x", "-o", "args="],
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode != 0:
+                    return None
+
+                # Find openconnect line
+                for line in result.stdout.splitlines():
+                    if "openconnect" in line and "grep" not in line:
+                        parts = line.split()
+                        server_address = None
+
+                        for part in parts:
+                            if part.startswith("--server="):
+                                server_address = part.split("=", 1)[1]
+                                break
+                            if not part.startswith("-") and "." in part and part != "openconnect":
+                                server_address = part
+
+                        if server_address:
+                            connections = self.get_connections()
+                            for name, details in connections.items():
+                                conn_address = details.get("address", "")
+                                if conn_address and (
+                                    conn_address == server_address or
+                                    conn_address in server_address or
+                                    server_address in conn_address
+                                ):
+                                    return name
+
+                return None
+
+            # Linux/default behavior
             result = subprocess.run(
-                ["ps", "-x", "-o", "args="],
+                ["pgrep", "-a", "openconnect"],
                 capture_output=True,
                 text=True
             )
             if result.returncode != 0:
                 return None
 
-            # Find openconnect line
-            for line in result.stdout.splitlines():
-                if "openconnect" in line and not "grep" in line:
-                    # Extract server address
-                    parts = line.split()
-                    server_address = None
+            cmd_line = result.stdout.strip()
 
-                    for i, part in enumerate(parts):
-                        if part.startswith("--server="):
-                            server_address = part.split("=", 1)[1]
-                            break
-                        if not part.startswith("-") and "." in part and part != "openconnect":
-                            server_address = part
+            # Extract server address from command line
+            # openconnect typically has the server as an argument
+            # Format: "PID openconnect [options] server"
+            parts = cmd_line.split()
+            if len(parts) < 2:
+                return None
 
-                    if server_address:
-                        # Match against saved connections
-                        connections = self.get_connections()
-                        for name, details in connections.items():
-                            conn_address = details.get("address", "")
-                            if conn_address and (
-                                conn_address == server_address or
-                                conn_address in server_address or
-                                server_address in conn_address
-                            ):
-                                return name
+            # The server is usually the last argument or after --server=
+            server_address = None
+            for part in parts:
+                if part.startswith("--server="):
+                    server_address = part.split("=", 1)[1]
+                    break
+                # Check if it looks like a hostname (not an option)
+                if not part.startswith("-") and "." in part and part != "openconnect":
+                    # Skip the PID (first element) and command name
+                    server_address = part
+
+            if not server_address:
+                return None
+
+            # Match against saved connections
+            connections = self.get_connections()
+            for name, details in connections.items():
+                conn_address = details.get("address", "")
+                # Match by server address (could be exact or partial match)
+                if conn_address and (
+                    conn_address == server_address or
+                    conn_address in server_address or
+                    server_address in conn_address
+                ):
+                    return name
 
         except Exception:
             pass

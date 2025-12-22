@@ -4,7 +4,7 @@ NetworkManager VPN Auth Dialog for MS SSO OpenConnect
 
 This dialog is called by NetworkManager when VPN secrets are needed.
 It can either:
-1. Look up saved credentials from keyring (shared with linux-ui)
+1. Look up saved credentials from keyring (shared with the UI app)
 2. Prompt the user for credentials via a GTK4 dialog
 """
 
