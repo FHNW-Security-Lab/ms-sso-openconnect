@@ -5,16 +5,16 @@ Architecture: amd64
 Version: 1.0.0-1
 Checksums-Md5:
  8224fbaf386db6565c26bb4068df2e82 19678 network-manager-ms-sso-dbgsym_1.0.0-1_amd64.ddeb
- 7bf76f913b4a2d76d89c35be8279d702 30874 network-manager-ms-sso_1.0.0-1_amd64.deb
+ 8bdab909182448c153404e02c7ae29dd 31504 network-manager-ms-sso_1.0.0-1_amd64.deb
 Checksums-Sha1:
  0c73028097873baf367a9f4c8febe2c451e5606b 19678 network-manager-ms-sso-dbgsym_1.0.0-1_amd64.ddeb
- 3d95b9d4b4aacfbff34bcd6b1d7468411e510fe9 30874 network-manager-ms-sso_1.0.0-1_amd64.deb
+ 7e5eb4a9c729edb6cff0050d9049fde1f32539dc 31504 network-manager-ms-sso_1.0.0-1_amd64.deb
 Checksums-Sha256:
  c00ff0578cebba7cc6c3c35e0e667cc602637f5fe379fac74d2a8c17d39dcbf1 19678 network-manager-ms-sso-dbgsym_1.0.0-1_amd64.ddeb
- 179254be71c3a0633b9eb55c863073c089fc5a8b5f0d737eb5439e5dc0e2980c 30874 network-manager-ms-sso_1.0.0-1_amd64.deb
+ e8b83481586a6cf85057495995c0329a5cc62da2de4a254628066f97e64494f0 31504 network-manager-ms-sso_1.0.0-1_amd64.deb
 Build-Origin: Ubuntu
 Build-Architecture: amd64
-Build-Date: Tue, 23 Dec 2025 21:15:58 +0100
+Build-Date: Tue, 23 Dec 2025 23:53:49 +0100
 Build-Tainted-By:
  usr-local-has-configs
  usr-local-has-libraries

@@ -17,10 +17,12 @@ This is a GNOME NetworkManager VPN plugin that integrates MS SSO OpenConnect wit
 ```bash
 sudo apt install \
     meson \
+    ninja-build \
     pkg-config \
     libnm-dev \
     libgtk-4-dev \
-    libglib2.0-dev
+    libglib2.0-dev \
+    libsecret-1-dev
 ```
 
 ### Runtime Dependencies
@@ -30,48 +32,58 @@ sudo apt install \
     network-manager \
     openconnect \
     python3 \
+    python3-pip \
     python3-gi \
     python3-keyring \
+    python3-secretstorage \
     python3-dbus \
+    python3-pyotp \
     gir1.2-nm-1.0 \
     gir1.2-gtk-4.0 \
-    gir1.2-adw-1
+    gir1.2-adw-1 \
+    gir1.2-secret-1
 ```
 
-Also install the main ms-sso-openconnect package (parent project).
+### Playwright (for SAML authentication)
+
+The plugin uses Playwright for browser-based Microsoft SSO authentication. Install it for the root user (since NetworkManager runs as root):
+
+```bash
+sudo pip3 install playwright
+sudo playwright install chromium
+```
+
+This installs Chromium to `/root/.cache/ms-playwright/`.
 
 ## Building
 
 ```bash
-cd nm-plugin
+cd gnome-nm-plugin
+./build-deb.sh
+```
+
+Or manually:
+
+```bash
+cd gnome-nm-plugin
 meson setup build
 meson compile -C build
 ```
 
 ## Installing
 
+### From .deb package (recommended)
+
 ```bash
-sudo meson install -C build
+sudo dpkg -i dist/network-manager-ms-sso_*.deb
+sudo apt-get install -f  # Install any missing dependencies
 sudo systemctl restart NetworkManager
 ```
 
-## Development Installation
-
-For development/testing without full installation:
+### Manual installation
 
 ```bash
-# Link files to system locations
-sudo ln -sf $(pwd)/src/nm-ms-sso-service.py /usr/libexec/nm-ms-sso-service
-sudo ln -sf $(pwd)/src/nm-ms-sso-auth-dialog.py /usr/libexec/nm-ms-sso-auth-dialog
-sudo ln -sf $(pwd)/data/nm-ms-sso-service.name /usr/lib/NetworkManager/VPN/
-sudo cp data/nm-ms-sso-service.conf /usr/share/dbus-1/system.d/
-
-# Build and install editor library
-meson setup build
-meson compile -C build
-sudo cp build/src/editor/libnm-vpn-plugin-ms-sso-editor.so /usr/lib/x86_64-linux-gnu/NetworkManager/
-
-# Restart NetworkManager
+sudo meson install -C build
 sudo systemctl restart NetworkManager
 ```
 
@@ -94,7 +106,7 @@ After installation:
 ## Architecture
 
 ```
-nm-plugin/
+gnome-nm-plugin/
 ├── src/
 │   ├── nm-ms-sso-service.py      # D-Bus VPN service
 │   ├── nm-ms-sso-auth-dialog.py  # GTK4 auth dialog
@@ -116,7 +128,7 @@ nm-plugin/
 2. **VPN Service** (`nm-ms-sso-service.py`)
    - D-Bus service implementing `org.freedesktop.NetworkManager.VPN.Plugin`
    - Handles Connect/Disconnect operations
-   - Reuses `ms-sso-openconnect.py` for SAML auth
+   - Uses Playwright for SAML authentication
 
 3. **Editor Plugin** (`nm-ms-sso-editor.c`)
    - GTK4 widget for GNOME Settings
@@ -148,8 +160,12 @@ sudo systemctl restart NetworkManager
 # Check service logs
 journalctl -u NetworkManager -f | grep ms-sso
 
-# Test SAML auth manually
-../ms-sso-openconnect.py --visible <connection-name>
+# Check if Playwright is installed for root
+sudo ls /root/.cache/ms-playwright/
+
+# If not, install it:
+sudo pip3 install playwright
+sudo playwright install chromium
 ```
 
 ### Editor library not loading
