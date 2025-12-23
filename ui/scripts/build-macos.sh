@@ -272,16 +272,29 @@ class VPNDaemon:
 
         # Handle cookies based on protocol
         cookie_value = None
+        gp_cookie_type = None
+
         if protocol == "gp":
-            if "portal-userauthcookie" in cookies:
-                cookie_value = cookies["portal-userauthcookie"]
-                cmd.extend(["--usergroup", "portal:portal-userauthcookie"])
-            elif "portal_userauthcookie" in cookies:
-                cookie_value = cookies["portal_userauthcookie"]
-                cmd.extend(["--usergroup", "portal:portal-userauthcookie"])
+            # GlobalProtect - add GP-specific options
+            cmd.extend(["--os=linux-64", "--useragent=PAN GlobalProtect"])
+
+            # Determine cookie and usergroup type
+            if cached_usergroup:
+                gp_cookie_type = cached_usergroup
+                if "portal-userauthcookie" in cookies:
+                    cookie_value = cookies["portal-userauthcookie"]
+                elif "prelogin-cookie" in cookies:
+                    cookie_value = cookies["prelogin-cookie"]
             elif "prelogin-cookie" in cookies:
-                cmd.extend(["--usergroup", f"portal:{cached_usergroup or 'prelogin-cookie'}"])
                 cookie_value = cookies["prelogin-cookie"]
+                gp_cookie_type = "portal:prelogin-cookie"
+            elif "portal-userauthcookie" in cookies:
+                cookie_value = cookies["portal-userauthcookie"]
+                gp_cookie_type = "portal:portal-userauthcookie"
+
+            # Add usergroup if we have one (use = format)
+            if gp_cookie_type:
+                cmd.append(f"--usergroup={gp_cookie_type}")
         else:
             # AnyConnect - check various cookie names
             for key in ["webvpn", "SVPNCOOKIE", "session_token"]:
@@ -294,18 +307,20 @@ class VPNDaemon:
         cmd.append(address)
 
         try:
-            if cookie_value and protocol != "gp":
+            if protocol == "gp" and cookie_value:
+                # GlobalProtect uses --passwd-on-stdin
                 self._openconnect_proc = subprocess.Popen(
-                    cmd + ["--cookie-on-stdin"],
+                    cmd + ["--passwd-on-stdin"],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                 )
                 self._openconnect_proc.stdin.write((cookie_value + "\n").encode())
                 self._openconnect_proc.stdin.close()
-            elif cookie_value and protocol == "gp":
+            elif cookie_value:
+                # AnyConnect uses --cookie-on-stdin
                 self._openconnect_proc = subprocess.Popen(
-                    cmd + ["--passwd-on-stdin"],
+                    cmd + ["--cookie-on-stdin"],
                     stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,

@@ -159,17 +159,29 @@ class VPNDaemon:
 
         # Handle cookies based on protocol
         cookie_value = None
+        gp_cookie_type = None
+
         if protocol == "gp":
-            # GlobalProtect uses different cookie handling
-            if "portal-userauthcookie" in cookies:
-                cookie_value = cookies["portal-userauthcookie"]
-                cmd.extend(["--usergroup", "portal:portal-userauthcookie"])
-            elif "portal_userauthcookie" in cookies:
-                cookie_value = cookies["portal_userauthcookie"]
-                cmd.extend(["--usergroup", "portal:portal-userauthcookie"])
+            # GlobalProtect - add GP-specific options first
+            cmd.extend(["--os=linux-64", "--useragent=PAN GlobalProtect"])
+
+            # Determine cookie and usergroup type
+            if cached_usergroup:
+                gp_cookie_type = cached_usergroup
+                if "portal-userauthcookie" in cookies:
+                    cookie_value = cookies["portal-userauthcookie"]
+                elif "prelogin-cookie" in cookies:
+                    cookie_value = cookies["prelogin-cookie"]
             elif "prelogin-cookie" in cookies:
-                cmd.extend(["--usergroup", f"portal:{cached_usergroup or 'prelogin-cookie'}"])
                 cookie_value = cookies["prelogin-cookie"]
+                gp_cookie_type = "portal:prelogin-cookie"
+            elif "portal-userauthcookie" in cookies:
+                cookie_value = cookies["portal-userauthcookie"]
+                gp_cookie_type = "portal:portal-userauthcookie"
+
+            # Add usergroup if we have one (use = format, not separate args)
+            if gp_cookie_type:
+                cmd.append(f"--usergroup={gp_cookie_type}")
         else:
             # AnyConnect - check various cookie names
             # webvpn is the standard AnyConnect cookie
@@ -185,7 +197,7 @@ class VPNDaemon:
                 cookie_value = "; ".join([f"{k}={v}" for k, v in cookies.items()])
                 print(f"[Daemon] Using combined cookies", file=sys.stderr)
 
-        # Add server address
+        # Add server address at the end
         cmd.append(address)
 
         # Start openconnect
