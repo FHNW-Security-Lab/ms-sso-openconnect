@@ -21,16 +21,16 @@ reports/
 *.swo
 
 # Build artifacts
-linux-ui/build/
-linux-ui/dist/
+ui/build/
+ui/dist/
 *.AppImage
 appimagetool*
 
 # NetworkManager plugin build artifacts
-nm-plugin/build/
-nm-plugin/debian-build/
-nm-plugin/dist/
-nm-plugin/*.deb
-nm-plugin/*.ddeb
-nm-plugin/*.buildinfo
-nm-plugin/*.changes
+gnome-nm-plugin/build/
+gnome-nm-plugin/debian-build/
+gnome-nm-plugin/dist/
+gnome-nm-plugin/*.deb
+gnome-nm-plugin/*.ddeb
+gnome-nm-plugin/*.buildinfo
+gnome-nm-plugin/*.changes
