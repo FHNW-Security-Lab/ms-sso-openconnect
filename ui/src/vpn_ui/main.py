@@ -212,23 +212,11 @@ class VPNApplication:
         # Immediately disable disconnect actions to prevent double-click
         self.tray.set_disconnect_enabled(False)
 
+        # Clean up any existing worker thread
         if self._worker_thread:
-            # Disconnect old signals to prevent any callbacks
-            try:
-                self._worker_thread.progress.disconnect()
-                self._worker_thread.finished.disconnect()
-                self._worker_thread.error.disconnect()
-            except (TypeError, RuntimeError):
-                pass  # Signals might not be connected
-
             if self._worker_thread.isRunning():
-                # Cancel ongoing connection attempt
                 self._worker_thread.cancel()
-                self._worker_thread.wait(5000)  # Wait up to 5 seconds
-
-            # Schedule old thread for deletion
-            self._worker_thread.deleteLater()
-            self._worker_thread = None
+            self._cleanup_worker_thread()
 
         # Create and start disconnect worker
         self._worker_thread = create_disconnect_thread(self.backend, force)
@@ -250,6 +238,27 @@ class VPNApplication:
         # Could show in a status bar or tooltip
         print(f"[Progress] {message}")
 
+    def _cleanup_worker_thread(self) -> None:
+        """Clean up the worker thread after it finishes."""
+        if self._worker_thread is None:
+            return
+
+        # Disconnect signals to prevent any further callbacks
+        try:
+            self._worker_thread.progress.disconnect()
+            self._worker_thread.finished.disconnect()
+            self._worker_thread.error.disconnect()
+        except (TypeError, RuntimeError):
+            pass  # Signals might already be disconnected
+
+        # Wait for thread to fully finish if still running
+        if self._worker_thread.isRunning():
+            self._worker_thread.wait(1000)
+
+        # Schedule for deletion and clear reference
+        self._worker_thread.deleteLater()
+        self._worker_thread = None
+
     def _on_connect_finished(self, success: bool, message: str) -> None:
         """Handle connection finished signal.
 
@@ -257,6 +266,9 @@ class VPNApplication:
             success: Whether connection succeeded
             message: Status message
         """
+        # Clean up worker thread properly
+        self._cleanup_worker_thread()
+
         if success:
             self.tray.set_status(STATUS_CONNECTED, self._current_connection)
             self.notifications.connected(self._current_connection)
@@ -277,6 +289,9 @@ class VPNApplication:
             success: Whether disconnect succeeded
             message: Status message
         """
+        # Clean up worker thread properly
+        self._cleanup_worker_thread()
+
         self._disconnecting = False  # Clear flag
         self.tray.set_status(STATUS_DISCONNECTED)
         if success:
