@@ -12,8 +12,8 @@ case "$1" in
         "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip wheel
         "$INSTALL_DIR/venv/bin/pip" install --quiet PyQt6 keyring pyotp playwright secretstorage
 
-        # Install the package
-        "$INSTALL_DIR/venv/bin/pip" install --quiet "$INSTALL_DIR"
+        # Install the package (force reinstall to update cached bytecode)
+        "$INSTALL_DIR/venv/bin/pip" install --quiet --force-reinstall --no-deps "$INSTALL_DIR"
 
         # Install Playwright browsers
         PLAYWRIGHT_BROWSERS_PATH="$INSTALL_DIR/browsers" "$INSTALL_DIR/venv/bin/playwright" install chromium
