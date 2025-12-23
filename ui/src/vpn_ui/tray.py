@@ -156,20 +156,17 @@ class VPNTrayIcon(QObject):
 
         if status == STATUS_CONNECTED:
             self._status_action.setText(f"Connected: {connection_name}")
-            self._disconnect_action.setEnabled(True)
-            self._force_disconnect_action.setEnabled(True)
+            self.set_disconnect_enabled(True)
             self._connections_menu.setEnabled(False)
             self.tray.setToolTip(f"{APP_NAME} - Connected to {connection_name}")
         elif status == STATUS_CONNECTING:
             self._status_action.setText(f"Connecting: {connection_name}...")
-            self._disconnect_action.setEnabled(True)
-            self._force_disconnect_action.setEnabled(True)
+            self.set_disconnect_enabled(True)
             self._connections_menu.setEnabled(False)
             self.tray.setToolTip(f"{APP_NAME} - Connecting to {connection_name}...")
         else:
             self._status_action.setText("Status: Disconnected")
-            self._disconnect_action.setEnabled(False)
-            self._force_disconnect_action.setEnabled(False)
+            self.set_disconnect_enabled(False)
             self._connections_menu.setEnabled(bool(self._connections))
             self.tray.setToolTip(f"{APP_NAME} - Disconnected")
 
@@ -195,6 +192,9 @@ class VPNTrayIcon(QObject):
         Args:
             enabled: Whether disconnect actions should be enabled
         """
+        # Block signals to prevent any queued triggers
+        self._disconnect_action.blockSignals(not enabled)
+        self._force_disconnect_action.blockSignals(not enabled)
         self._disconnect_action.setEnabled(enabled)
         self._force_disconnect_action.setEnabled(enabled)
 

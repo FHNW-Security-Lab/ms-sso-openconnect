@@ -212,10 +212,23 @@ class VPNApplication:
         # Immediately disable disconnect actions to prevent double-click
         self.tray.set_disconnect_enabled(False)
 
-        if self._worker_thread and self._worker_thread.isRunning():
-            # Cancel ongoing connection attempt
-            self._worker_thread.cancel()
-            self._worker_thread.wait(5000)  # Wait up to 5 seconds
+        if self._worker_thread:
+            # Disconnect old signals to prevent any callbacks
+            try:
+                self._worker_thread.progress.disconnect()
+                self._worker_thread.finished.disconnect()
+                self._worker_thread.error.disconnect()
+            except (TypeError, RuntimeError):
+                pass  # Signals might not be connected
+
+            if self._worker_thread.isRunning():
+                # Cancel ongoing connection attempt
+                self._worker_thread.cancel()
+                self._worker_thread.wait(5000)  # Wait up to 5 seconds
+
+            # Schedule old thread for deletion
+            self._worker_thread.deleteLater()
+            self._worker_thread = None
 
         # Create and start disconnect worker
         self._worker_thread = create_disconnect_thread(self.backend, force)
