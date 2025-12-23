@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Unique identifier for this LaunchDaemon -->
+    <key>Label</key>
+    <string>com.github.ms-sso-openconnect.daemon</string>
+
+    <!-- Program to run (installed by pkg) -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/PrivilegedHelperTools/ms-sso-openconnect-daemon</string>
+    </array>
+
+    <!-- Run as root -->
+    <key>UserName</key>
+    <string>root</string>
+
+    <!-- Start at system boot -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Keep the daemon running (restart if it crashes) -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Log files -->
+    <key>StandardOutPath</key>
+    <string>/var/log/ms-sso-openconnect-daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/ms-sso-openconnect-daemon.error.log</string>
+
+    <!-- Working directory -->
+    <key>WorkingDirectory</key>
+    <string>/Library/PrivilegedHelperTools</string>
+
+    <!-- Throttle interval to prevent rapid restarts -->
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+</dict>
+</plist>
