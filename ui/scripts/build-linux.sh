@@ -122,6 +122,7 @@ build_deb() {
     # Copy source
     cp -r "$UI_DIR/src" "$BUILD_DIR/"
     cp -r "$UI_DIR/packaging/linux/debian" "$BUILD_DIR/"
+    cp -r "$UI_DIR/packaging" "$BUILD_DIR/"
     cp "$UI_DIR/pyproject.toml" "$BUILD_DIR/"
 
     # Copy core module
