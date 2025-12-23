@@ -212,11 +212,17 @@ class VPNApplication:
         # Immediately disable disconnect actions to prevent double-click
         self.tray.set_disconnect_enabled(False)
 
-        # Clean up any existing worker thread
-        if self._worker_thread:
-            if self._worker_thread.isRunning():
-                self._worker_thread.cancel()
-            self._cleanup_worker_thread()
+        # Cancel and wait for any existing worker thread (e.g., connect thread)
+        if self._worker_thread and self._worker_thread.isRunning():
+            self._worker_thread.cancel()
+            # Disconnect signals to prevent callbacks during cleanup
+            try:
+                self._worker_thread.progress.disconnect()
+                self._worker_thread.finished.disconnect()
+                self._worker_thread.error.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+            # Don't wait - the disconnect will kill openconnect anyway
 
         # Create and start disconnect worker
         self._worker_thread = create_disconnect_thread(self.backend, force)
