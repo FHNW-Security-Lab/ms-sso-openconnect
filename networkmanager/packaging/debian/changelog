@@ -1,0 +1,6 @@
+network-manager-ms-sso-openconnect (0.1.0-3) UNRELEASED; urgency=medium
+
+  * Install bundled core script to a non-conflicting path.
+  * Fix secrets handling for PyGObject.
+
+ -- MS SSO OpenConnect Contributors <noreply@example.com>  Wed, 17 Dec 2025 00:00:00 +0000

@@ -1,0 +1,29 @@
+Format: 1.8
+Date: Wed, 17 Dec 2025 00:00:00 +0000
+Source: network-manager-ms-sso-openconnect
+Binary: network-manager-ms-sso-openconnect
+Built-For-Profiles: noudeb
+Architecture: amd64
+Version: 0.1.0-2
+Distribution: UNRELEASED
+Urgency: medium
+Maintainer: MS SSO OpenConnect Contributors <noreply@example.com>
+Changed-By: MS SSO OpenConnect Contributors <noreply@example.com>
+Description:
+ network-manager-ms-sso-openconnect - NetworkManager plugin for MS SSO OpenConnect (GNOME VPN UI)
+Changes:
+ network-manager-ms-sso-openconnect (0.1.0-2) UNRELEASED; urgency=medium
+ .
+   * Install bundled core script to a non-conflicting path.
+Checksums-Sha1:
+ a19d27b61a9f44ea7a7e4c9232193d035390f391 20192 network-manager-ms-sso-openconnect-dbgsym_0.1.0-2_amd64.ddeb
+ f97255f09436ee59b38db56ebec6b7e409078b1e 17374 network-manager-ms-sso-openconnect_0.1.0-2_amd64.buildinfo
+ 434351c7055e80feb75ad204114e58a839ede2bf 29570 network-manager-ms-sso-openconnect_0.1.0-2_amd64.deb
+Checksums-Sha256:
+ 38e14aea12ced26c65bdde12f5f7e29c62134114102cea523d2fb1f0e30ca450 20192 network-manager-ms-sso-openconnect-dbgsym_0.1.0-2_amd64.ddeb
+ da02b17fc671f4880548a09122c7b8f15c17e02298254a9ef86d38e5bae83632 17374 network-manager-ms-sso-openconnect_0.1.0-2_amd64.buildinfo
+ ce1e41f43b4823f81b69b338809eaf191a9a55ac0316182b7a2cdfcf0fc4b9f9 29570 network-manager-ms-sso-openconnect_0.1.0-2_amd64.deb
+Files:
+ 9463099aac74c49874966574897652f5 20192 debug optional network-manager-ms-sso-openconnect-dbgsym_0.1.0-2_amd64.ddeb
+ 9b2a45efb5efafe68badf1811c15d086 17374 net optional network-manager-ms-sso-openconnect_0.1.0-2_amd64.buildinfo
+ f3a404d789d9be5ed6963a0b8df7cf03 29570 net optional network-manager-ms-sso-openconnect_0.1.0-2_amd64.deb

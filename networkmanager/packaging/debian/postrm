@@ -1,0 +1,13 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    purge|remove)
+        rm -rf /opt/ms-sso-openconnect-nm || true
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0
+

@@ -1,0 +1,31 @@
+Source: network-manager-ms-sso-openconnect
+Section: net
+Priority: optional
+Maintainer: MS SSO OpenConnect Contributors <noreply@example.com>
+Build-Depends: debhelper-compat (= 13),
+               meson,
+               ninja-build,
+               pkg-config,
+               libglib2.0-dev,
+               libnm-dev,
+               libgtk-4-dev,
+               python3
+Standards-Version: 4.6.2
+Homepage: https://github.com/example/ms-sso-openconnect
+Rules-Requires-Root: no
+
+Package: network-manager-ms-sso-openconnect
+Architecture: any
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         python3,
+         network-manager,
+         openconnect,
+         python3-gi,
+         gir1.2-nm-1.0,
+         gir1.2-gtk-4.0,
+         python3-venv
+Description: NetworkManager plugin for MS SSO OpenConnect (GNOME VPN UI)
+ A NetworkManager VPN plugin that integrates Microsoft SSO authentication
+ (via Playwright) with OpenConnect, allowing configuration and connection
+ from GNOME's native VPN settings UI.

@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""OpenConnect vpnc-script helper for ms-sso-openconnect NetworkManager plugin.
+
+OpenConnect executes this helper with a vpnc-script style environment.
+The helper forwards the configuration to the VPN service over D-Bus by calling:
+- SetConfig(a{sv})
+- SetIp4Config(a{sv})
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import os
+import socket
+import struct
+import sys
+from typing import Optional
+
+import gi
+
+gi.require_version("Gio", "2.0")
+gi.require_version("GLib", "2.0")
+gi.require_version("NM", "1.0")
+
+from gi.repository import Gio, GLib, NM  # noqa: E402
+
+
+SERVICE_NAME = "org.freedesktop.NetworkManager.ms-sso-openconnect"
+PLUGIN_PATH = "/org/freedesktop/NetworkManager/VPN/Plugin"
+PLUGIN_IFACE = "org.freedesktop.NetworkManager.VPN.Plugin"
+
+
+def _ip4_to_uint32(ip: str) -> int:
+    # libnm expects IPv4 addresses in "network byte order" packed into a guint32.
+    # Passing the raw bytes interpreted as native-endian integer matches libnm's helpers.
+    return struct.unpack("I", socket.inet_aton(ip))[0]
+
+
+def _parse_bool(value: Optional[str]) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _get_reason() -> str:
+    return os.environ.get("reason", "")
+
+
+def _call(proxy: Gio.DBusProxy, method: str, payload: dict) -> None:
+    proxy.call_sync(
+        method,
+        GLib.Variant("(a{sv})", (payload,)),
+        Gio.DBusCallFlags.NONE,
+        10_000,
+        None,
+    )
+
+
+def _build_ip4_routes() -> tuple[Optional[GLib.Variant], bool]:
+    split_inc = os.environ.get("CISCO_SPLIT_INC")
+    if not split_inc:
+        return None, False
+    try:
+        count = int(split_inc)
+    except ValueError:
+        return None, False
+
+    routes: list[NM.IPRoute] = []
+    has_default = False
+    for i in range(count):
+        addr = os.environ.get(f"CISCO_SPLIT_INC_{i}_ADDR")
+        mask = os.environ.get(f"CISCO_SPLIT_INC_{i}_MASK")
+        if not addr or not mask:
+            continue
+        try:
+            prefix = ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen
+        except Exception:
+            continue
+        if addr == "0.0.0.0" and prefix == 0:
+            has_default = True
+        routes.append(NM.IPRoute.new(socket.AF_INET, addr, prefix, None, 0))
+
+    if not routes:
+        return None, False
+
+    return NM.utils_ip4_routes_to_variant(routes), has_default
+
+
+def main() -> int:
+    reason = _get_reason()
+    if reason not in {"connect", "reconnect", "attempt-reconnect"}:
+        return 0
+
+    try:
+        proxy = Gio.DBusProxy.new_for_bus_sync(
+            Gio.BusType.SYSTEM,
+            Gio.DBusProxyFlags.NONE,
+            None,
+            SERVICE_NAME,
+            PLUGIN_PATH,
+            PLUGIN_IFACE,
+            None,
+        )
+    except Exception as exc:
+        print(f"Failed to create D-Bus proxy: {exc}", file=sys.stderr)
+        return 0
+
+    tundev = os.environ.get("TUNDEV") or ""
+    vpn_gateway = os.environ.get("VPNGATEWAY") or ""
+    mtu_raw = os.environ.get("INTERNAL_IP4_MTU") or ""
+    banner = os.environ.get("CISCO_BANNER") or ""
+
+    has_ip4 = bool(os.environ.get("INTERNAL_IP4_ADDRESS"))
+    has_ip6 = bool(os.environ.get("INTERNAL_IP6_ADDRESS"))
+
+    config: dict[str, GLib.Variant] = {
+        NM.VPN_PLUGIN_CONFIG_TUNDEV: GLib.Variant("s", tundev),
+        NM.VPN_PLUGIN_CONFIG_HAS_IP4: GLib.Variant("b", has_ip4),
+        NM.VPN_PLUGIN_CONFIG_HAS_IP6: GLib.Variant("b", has_ip6),
+    }
+
+    if vpn_gateway:
+        try:
+            config[NM.VPN_PLUGIN_CONFIG_EXT_GATEWAY] = GLib.Variant("u", _ip4_to_uint32(vpn_gateway))
+        except Exception:
+            pass
+
+    if mtu_raw:
+        try:
+            config[NM.VPN_PLUGIN_CONFIG_MTU] = GLib.Variant("u", int(mtu_raw))
+        except Exception:
+            pass
+
+    if banner:
+        config[NM.VPN_PLUGIN_CONFIG_BANNER] = GLib.Variant("s", banner)
+
+    try:
+        _call(proxy, "SetConfig", config)
+    except Exception as exc:
+        print(f"SetConfig failed: {exc}", file=sys.stderr)
+
+    if has_ip4:
+        address = os.environ.get("INTERNAL_IP4_ADDRESS") or ""
+        netmask = os.environ.get("INTERNAL_IP4_NETMASK") or ""
+        dns_raw = os.environ.get("INTERNAL_IP4_DNS") or ""
+        nbns_raw = os.environ.get("INTERNAL_IP4_NBNS") or ""
+        domain = os.environ.get("CISCO_DEF_DOMAIN") or os.environ.get("INTERNAL_IP4_DOMAIN") or ""
+
+        ip4_config: dict[str, GLib.Variant] = {}
+
+        try:
+            ip4_config[NM.VPN_PLUGIN_IP4_CONFIG_ADDRESS] = GLib.Variant("u", _ip4_to_uint32(address))
+        except Exception:
+            pass
+
+        if netmask:
+            try:
+                prefix = ipaddress.IPv4Network(f"0.0.0.0/{netmask}").prefixlen
+                ip4_config[NM.VPN_PLUGIN_IP4_CONFIG_PREFIX] = GLib.Variant("u", int(prefix))
+            except Exception:
+                pass
+
+        if dns_raw:
+            dns: list[int] = []
+            for item in dns_raw.split():
+                try:
+                    dns.append(_ip4_to_uint32(item))
+                except Exception:
+                    continue
+            if dns:
+                ip4_config[NM.VPN_PLUGIN_IP4_CONFIG_DNS] = GLib.Variant("au", dns)
+
+        if nbns_raw:
+            nbns: list[int] = []
+            for item in nbns_raw.split():
+                try:
+                    nbns.append(_ip4_to_uint32(item))
+                except Exception:
+                    continue
+            if nbns:
+                ip4_config[NM.VPN_PLUGIN_IP4_CONFIG_NBNS] = GLib.Variant("au", nbns)
+
+        if domain:
+            ip4_config[NM.VPN_PLUGIN_IP4_CONFIG_DOMAIN] = GLib.Variant("s", domain)
+
+        routes_variant, has_default_route = _build_ip4_routes()
+        if routes_variant is not None:
+            ip4_config[NM.VPN_PLUGIN_IP4_CONFIG_ROUTES] = routes_variant
+            if not has_default_route:
+                ip4_config[NM.VPN_PLUGIN_IP4_CONFIG_NEVER_DEFAULT] = GLib.Variant("b", True)
+
+        try:
+            _call(proxy, "SetIp4Config", ip4_config)
+        except Exception as exc:
+            print(f"SetIp4Config failed: {exc}", file=sys.stderr)
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+

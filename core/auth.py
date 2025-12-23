@@ -263,16 +263,59 @@ def do_saml_auth(
                     print("    [DEBUG] Detected account picker screen")
                     page.screenshot(path="/tmp/vpn-step1b-accountpicker.png")
 
-                # Check if the desired username is already listed
+                # Check if the desired username is already listed (case-insensitive)
                 username_email = username.lower()
-                account_tile = page.locator(f'small:text-is("{username_email}")')
+                account_found = False
 
-                if account_tile.count() > 0:
-                    print(f"  [2/6] Selecting existing account: {username}")
-                    # Click the parent div of the email text
-                    account_tile.first.click()
+                # Try multiple selectors to find matching account tile
+                # MS login shows email in various elements depending on account state
+                account_selectors = [
+                    f'div[data-test-id*="tile"]:has-text("{username_email}")',
+                    f'small:text-is("{username_email}")',
+                    f'div.table-cell:has-text("{username_email}")',
+                    f'div[role="button"]:has-text("{username_email}")',
+                    f'*[data-test-id]:has-text("{username_email}")',
+                ]
+
+                for sel in account_selectors:
+                    try:
+                        account_tile = page.locator(sel)
+                        if account_tile.count() > 0 and account_tile.first.is_visible():
+                            print(f"  [2/6] Selecting existing account: {username}")
+                            account_tile.first.click()
+                            account_found = True
+                            if debug:
+                                print(f"    [DEBUG] Clicked account with selector: {sel}")
+                            break
+                    except Exception as e:
+                        if debug:
+                            print(f"    [DEBUG] Selector {sel} failed: {e}")
+                        continue
+
+                if account_found:
                     page.wait_for_load_state("domcontentloaded")
                     time.sleep(2)
+
+                    # Check if clicking signed-in account completed auth (no password needed)
+                    current_url = page.url
+                    if vpn_server in current_url:
+                        print("  -> Fast reconnect: account session still valid!")
+                        all_cookies = context.cookies()
+                        session_cookies = {}
+                        for c in all_cookies:
+                            domain = c.get('domain', '')
+                            name = c['name']
+                            if (domain == vpn_server or domain == f'.{vpn_server}') and c.get('value'):
+                                session_cookies[name] = c['value']
+                        if saml_result['saml_response']:
+                            session_cookies['SAMLResponse'] = saml_result['saml_response']
+                        if saml_result['prelogin_cookie']:
+                            session_cookies['prelogin-cookie'] = saml_result['prelogin_cookie']
+                        if gp_prelogin_cookie and 'prelogin-cookie' not in session_cookies:
+                            session_cookies['prelogin-cookie'] = gp_prelogin_cookie
+                        if session_cookies:
+                            context.close()
+                            return session_cookies
                 else:
                     # Click "Use another account" - try multiple selectors
                     print("  [2/6] Clicking 'Use another account'...")

@@ -1,0 +1,12 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+
+%:
+	dh $@ --buildsystem=meson
+
+override_dh_auto_install:
+	dh_auto_install --destdir=debian/network-manager-ms-sso-openconnect
+	# Install the core Python module used by the service
+	install -D -m 755 ../ms-sso-openconnect.py \
+		debian/network-manager-ms-sso-openconnect/usr/share/network-manager-ms-sso-openconnect/ms-sso-openconnect.py
