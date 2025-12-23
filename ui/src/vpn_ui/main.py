@@ -3,7 +3,7 @@
 import sys
 from typing import Optional
 
-from PyQt6.QtCore import QCoreApplication
+from PyQt6.QtCore import QCoreApplication, QTimer
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
@@ -239,25 +239,39 @@ class VPNApplication:
         print(f"[Progress] {message}")
 
     def _cleanup_worker_thread(self) -> None:
-        """Clean up the worker thread after it finishes."""
+        """Clean up the worker thread after it finishes.
+
+        Uses deferred cleanup to avoid destroying thread from its own signal.
+        """
         if self._worker_thread is None:
             return
 
+        thread = self._worker_thread
+        self._worker_thread = None
+
         # Disconnect signals to prevent any further callbacks
         try:
-            self._worker_thread.progress.disconnect()
-            self._worker_thread.finished.disconnect()
-            self._worker_thread.error.disconnect()
+            thread.progress.disconnect()
+            thread.finished.disconnect()
+            thread.error.disconnect()
         except (TypeError, RuntimeError):
             pass  # Signals might already be disconnected
 
-        # Wait for thread to fully finish if still running
-        if self._worker_thread.isRunning():
-            self._worker_thread.wait(1000)
+        # Defer actual cleanup to next event loop iteration
+        # This prevents "QThread: Destroyed while thread is still running"
+        QTimer.singleShot(0, lambda: self._do_thread_cleanup(thread))
 
-        # Schedule for deletion and clear reference
-        self._worker_thread.deleteLater()
-        self._worker_thread = None
+    def _do_thread_cleanup(self, thread: VPNWorkerThread) -> None:
+        """Actually clean up the thread (called deferred)."""
+        if thread is None:
+            return
+
+        # Wait for thread to fully finish if still running
+        if thread.isRunning():
+            thread.wait(2000)
+
+        # Schedule for deletion
+        thread.deleteLater()
 
     def _on_connect_finished(self, success: bool, message: str) -> None:
         """Handle connection finished signal.
