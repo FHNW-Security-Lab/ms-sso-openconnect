@@ -1,0 +1,33 @@
+Format: 1.8
+Date: Mon, 01 Jan 2024 00:00:00 +0000
+Source: network-manager-ms-sso
+Binary: network-manager-ms-sso
+Built-For-Profiles: noudeb
+Architecture: amd64
+Version: 1.0.0-1
+Distribution: unstable
+Urgency: medium
+Maintainer: MS SSO OpenConnect Maintainers <maintainers@example.com>
+Changed-By: MS SSO OpenConnect Maintainers <maintainers@example.com>
+Description:
+ network-manager-ms-sso - NetworkManager VPN plugin for MS SSO OpenConnect
+Changes:
+ network-manager-ms-sso (1.0.0-1) unstable; urgency=medium
+ .
+   * Initial release.
+   * NetworkManager VPN plugin for MS SSO OpenConnect
+   * GTK4 editor for GNOME Settings integration
+   * Python D-Bus service for VPN connection handling
+   * Auth dialog with keyring integration
+Checksums-Sha1:
+ 0c73028097873baf367a9f4c8febe2c451e5606b 19678 network-manager-ms-sso-dbgsym_1.0.0-1_amd64.ddeb
+ bc7b7ab5481dd7aa6407e45069f8e3faded08432 17540 network-manager-ms-sso_1.0.0-1_amd64.buildinfo
+ 3d95b9d4b4aacfbff34bcd6b1d7468411e510fe9 30874 network-manager-ms-sso_1.0.0-1_amd64.deb
+Checksums-Sha256:
+ c00ff0578cebba7cc6c3c35e0e667cc602637f5fe379fac74d2a8c17d39dcbf1 19678 network-manager-ms-sso-dbgsym_1.0.0-1_amd64.ddeb
+ 13b925eb46600eb7a25f3591d418f7c80fd4bad0fff690904433f5233be25053 17540 network-manager-ms-sso_1.0.0-1_amd64.buildinfo
+ 179254be71c3a0633b9eb55c863073c089fc5a8b5f0d737eb5439e5dc0e2980c 30874 network-manager-ms-sso_1.0.0-1_amd64.deb
+Files:
+ 8224fbaf386db6565c26bb4068df2e82 19678 debug optional network-manager-ms-sso-dbgsym_1.0.0-1_amd64.ddeb
+ 8a22c78e60262fbcf5d5698e3bc4db5b 17540 net optional network-manager-ms-sso_1.0.0-1_amd64.buildinfo
+ 7bf76f913b4a2d76d89c35be8279d702 30874 net optional network-manager-ms-sso_1.0.0-1_amd64.deb

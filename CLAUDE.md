@@ -31,7 +31,7 @@ ui/                     # Unified Qt6 GUI (Linux + macOS)
 ├── macos/daemon/       # macOS LaunchDaemon (runs as root)
 └── scripts/            # Build scripts (build-linux.sh, build-macos.sh)
 
-nm-plugin/              # GNOME NetworkManager VPN plugin (D-Bus + GTK4)
+gnome-nm-plugin/        # GNOME NetworkManager VPN plugin (D-Bus + GTK4)
 ```
 
 **Key Patterns**:
@@ -62,9 +62,9 @@ cd ui
 ./scripts/build-macos.sh [version]    # Build .pkg with daemon
 ```
 
-### NetworkManager Plugin
+### GNOME NetworkManager Plugin
 ```bash
-cd nm-plugin
+cd gnome-nm-plugin
 ./build-deb.sh                # Build .deb with meson
 ```
 
@@ -112,4 +112,4 @@ python -m vpn_ui              # Run UI from source
 3. `ui/src/vpn_ui/backend/shared.py` - How GUI wraps core module
 4. `ui/src/vpn_ui/platform/backend.py` - Platform-specific connect/disconnect
 5. `ui/macos/daemon/vpn_daemon.py` - macOS daemon implementation
-6. `nm-plugin/src/nm-ms-sso-service.py` - D-Bus VPN service implementation
+6. `gnome-nm-plugin/src/nm-ms-sso-service.py` - D-Bus VPN service implementation
