@@ -27,6 +27,19 @@ else:
 
 def _setup_system_venv():
     """Add system venv to path if it exists."""
+    # Check if running in PyInstaller bundle
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        # For PyInstaller, browsers are in the app bundle's Resources
+        # The app bundle structure is: .app/Contents/MacOS/executable
+        # Browsers should be in: .app/Contents/Resources/browsers
+        if sys.platform == "darwin":
+            executable_dir = Path(sys.executable).parent
+            resources_dir = executable_dir.parent / "Resources"
+            browsers_dir = resources_dir / "browsers"
+            if browsers_dir.exists():
+                os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(browsers_dir))
+        return
+
     venv_paths = [SYSTEM_VENV]
     if USER_APP_BUNDLE:
         venv_paths.insert(0, USER_APP_BUNDLE / "venv")
@@ -55,11 +68,20 @@ def _setup_core_module():
     except ImportError:
         pass
 
+    # Check if running in PyInstaller bundle
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        # PyInstaller bundles the core module in _MEIPASS
+        bundle_dir = Path(sys._MEIPASS)
+        if (bundle_dir / "core").exists():
+            if str(bundle_dir) not in sys.path:
+                sys.path.insert(0, str(bundle_dir))
+            return
+
     # Paths to search for core module
     search_paths = []
 
     # Development: ui/src/vpn_ui/backend/shared.py -> ../../../../core
-    project_root = Path(__file__).parent.parent.parent.parent.parent
+    project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
     if (project_root / "core").exists():
         search_paths.append(project_root)
 

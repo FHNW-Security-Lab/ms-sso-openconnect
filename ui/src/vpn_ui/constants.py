@@ -1,5 +1,6 @@
 """Constants and configuration for VPN UI."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -10,8 +11,15 @@ APP_NAME = "MS SSO OpenConnect"
 APP_ID = "com.github.ms-sso-openconnect-ui"
 VERSION = "2.0.0"
 
-# Paths
-RESOURCES_DIR = Path(__file__).parent / "resources"
+# Paths - handle PyInstaller bundle vs development
+if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+    # Running in PyInstaller bundle
+    BUNDLE_DIR = Path(sys._MEIPASS)
+    RESOURCES_DIR = BUNDLE_DIR / "vpn_ui" / "resources"
+else:
+    # Running from source
+    RESOURCES_DIR = Path(__file__).resolve().parent / "resources"
+
 ICONS_DIR = RESOURCES_DIR / "icons"
 
 # Platform-specific paths

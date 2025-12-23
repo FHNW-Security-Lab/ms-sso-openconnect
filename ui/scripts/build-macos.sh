@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build script for macOS (pkg with daemon)
+# Build script for macOS (pkg with daemon) using PyInstaller
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -25,95 +25,146 @@ rm -rf "$BUILD_DIR"
 mkdir -p "$PKG_ROOT" "$SCRIPTS_DIR" "$DIST_DIR"
 
 # ===========================================================================
-# Build the .app bundle (UI application)
+# Build the .app bundle using PyInstaller
 # ===========================================================================
 echo ""
-echo "=== Building .app Bundle ==="
+echo "=== Building .app Bundle with PyInstaller ==="
 
-APP_DIR="$PKG_ROOT/Applications/MS SSO OpenConnect.app"
-CONTENTS="$APP_DIR/Contents"
-MACOS_DIR="$CONTENTS/MacOS"
-RESOURCES="$CONTENTS/Resources"
+# Create/activate virtual environment for building
+VENV_DIR="$BUILD_DIR/build-venv"
+python3 -m venv "$VENV_DIR"
+source "$VENV_DIR/bin/activate"
 
-mkdir -p "$MACOS_DIR" "$RESOURCES"
-
-# Detect Python version
-PYTHON_VERSION=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-echo "Using Python $PYTHON_VERSION"
-
-# Create virtual environment
-echo "Creating virtual environment..."
-python3 -m venv "$RESOURCES/venv"
-source "$RESOURCES/venv/bin/activate"
-
-# Install dependencies
-echo "Installing dependencies..."
+# Install build dependencies
+echo "Installing build dependencies..."
 pip install -q --upgrade pip wheel
-pip install -q PyQt6 keyring pyotp playwright
+pip install -q pyinstaller PyQt6 keyring pyotp playwright
 
-# Install the UI package
-pip install -q "$UI_DIR"
+# Install the UI package in development mode
+pip install -q -e "$UI_DIR"
 
-# Install Playwright browsers
+# Create PyInstaller spec file
+echo "Creating PyInstaller spec..."
+cat > "$BUILD_DIR/ms-sso-openconnect.spec" << 'SPEC'
+# -*- mode: python ; coding: utf-8 -*-
+import sys
+from pathlib import Path
+
+# Paths
+ui_dir = Path(SPECPATH).parent.parent
+repo_root = ui_dir.parent
+src_dir = ui_dir / "src"
+resources_dir = src_dir / "vpn_ui" / "resources"
+core_dir = repo_root / "core"
+
+block_cipher = None
+
+a = Analysis(
+    [str(src_dir / "vpn_ui" / "__main__.py")],
+    pathex=[str(src_dir), str(repo_root)],
+    binaries=[],
+    datas=[
+        # Include icons
+        (str(resources_dir / "icons"), "vpn_ui/resources/icons"),
+        # Include core module
+        (str(core_dir), "core"),
+    ],
+    hiddenimports=[
+        "PyQt6.QtCore",
+        "PyQt6.QtGui",
+        "PyQt6.QtWidgets",
+        "PyQt6.sip",
+        "keyring.backends",
+        "keyring.backends.macOS",
+        "playwright",
+        "playwright.sync_api",
+        "playwright.async_api",
+        "pyotp",
+        "core",
+        "core.auth",
+        "core.config",
+        "core.connect",
+        "core.cookies",
+    ],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="ms-sso-openconnect-ui",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=True,
+    upx_exclude=[],
+    name="ms-sso-openconnect-ui",
+)
+
+app = BUNDLE(
+    coll,
+    name="MS SSO OpenConnect.app",
+    icon=None,
+    bundle_identifier="com.github.ms-sso-openconnect-ui",
+    info_plist={
+        "CFBundleName": "MS SSO OpenConnect",
+        "CFBundleDisplayName": "MS SSO OpenConnect",
+        "CFBundleVersion": "VERSION_PLACEHOLDER",
+        "CFBundleShortVersionString": "VERSION_PLACEHOLDER",
+        "LSMinimumSystemVersion": "11.0",
+        "LSUIElement": True,
+        "NSHighResolutionCapable": True,
+        "NSAppleEventsUsageDescription": "This app needs to send Apple Events for notifications.",
+    },
+)
+SPEC
+
+# Replace version placeholder
+sed -i '' "s/VERSION_PLACEHOLDER/${VERSION}/g" "$BUILD_DIR/ms-sso-openconnect.spec"
+
+# Run PyInstaller
+echo "Running PyInstaller..."
+cd "$BUILD_DIR"
+pyinstaller --clean --noconfirm ms-sso-openconnect.spec
+
+# Move the app to pkg root
+echo "Moving app to package root..."
+mkdir -p "$PKG_ROOT/Applications"
+mv "$BUILD_DIR/dist/MS SSO OpenConnect.app" "$PKG_ROOT/Applications/"
+
+# Install Playwright browsers into the app bundle
 echo "Installing Playwright Chromium..."
-PLAYWRIGHT_BROWSERS_PATH="$RESOURCES/browsers" playwright install chromium
+BROWSERS_DIR="$PKG_ROOT/Applications/MS SSO OpenConnect.app/Contents/Resources/browsers"
+mkdir -p "$BROWSERS_DIR"
+PLAYWRIGHT_BROWSERS_PATH="$BROWSERS_DIR" playwright install chromium
 
 deactivate
-
-# Copy core module
-echo "Copying core module..."
-cp -r "$REPO_ROOT/core" "$RESOURCES/"
-
-# Copy icons
-mkdir -p "$RESOURCES/icons"
-cp "$UI_DIR/src/vpn_ui/resources/icons/"*.svg "$RESOURCES/icons/"
-
-# Create launcher script
-cat > "$MACOS_DIR/ms-sso-openconnect-ui" << LAUNCHER
-#!/bin/bash
-DIR="\$(dirname "\$0")"
-RESOURCES="\$DIR/../Resources"
-
-export PLAYWRIGHT_BROWSERS_PATH="\$RESOURCES/browsers"
-export PYTHONPATH="\$RESOURCES:\$PYTHONPATH"
-export PATH="\$RESOURCES/venv/bin:\$PATH"
-export QT_PLUGIN_PATH="\$RESOURCES/venv/lib/python${PYTHON_VERSION}/site-packages/PyQt6/Qt6/plugins"
-
-exec "\$RESOURCES/venv/bin/python" -m vpn_ui "\$@"
-LAUNCHER
-chmod +x "$MACOS_DIR/ms-sso-openconnect-ui"
-
-# Create Info.plist
-cat > "$CONTENTS/Info.plist" << PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleName</key>
-    <string>MS SSO OpenConnect</string>
-    <key>CFBundleDisplayName</key>
-    <string>MS SSO OpenConnect</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.github.ms-sso-openconnect-ui</string>
-    <key>CFBundleVersion</key>
-    <string>${VERSION}</string>
-    <key>CFBundleShortVersionString</key>
-    <string>${VERSION}</string>
-    <key>CFBundleExecutable</key>
-    <string>ms-sso-openconnect-ui</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>11.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSAppleEventsUsageDescription</key>
-    <string>This app needs to send Apple Events for notifications.</string>
-</dict>
-</plist>
-PLIST
 
 # ===========================================================================
 # Build the daemon
@@ -126,7 +177,7 @@ LAUNCHDAEMON_DIR="$PKG_ROOT/Library/LaunchDaemons"
 
 mkdir -p "$DAEMON_DIR" "$LAUNCHDAEMON_DIR"
 
-# Create the daemon executable (standalone Python script with bundled deps)
+# Create the daemon executable (standalone Python script - uses system Python)
 cat > "$DAEMON_DIR/ms-sso-openconnect-daemon" << 'DAEMON_SCRIPT'
 #!/usr/bin/env python3
 """VPN Daemon - runs as root via LaunchDaemon."""
@@ -143,6 +194,20 @@ from typing import Optional
 DAEMON_VERSION = "1.0.0"
 SOCKET_PATH = "/var/run/ms-sso-openconnect/daemon.sock"
 PID_FILE = "/var/run/ms-sso-openconnect/daemon.pid"
+
+# Search paths for openconnect binary
+OPENCONNECT_PATHS = [
+    "/opt/homebrew/bin/openconnect",
+    "/usr/local/bin/openconnect",
+    "/usr/bin/openconnect",
+]
+
+
+def find_openconnect():
+    for path in OPENCONNECT_PATHS:
+        if os.path.exists(path):
+            return path
+    return None
 
 
 class VPNDaemon:
@@ -192,13 +257,9 @@ class VPNDaemon:
         cookies = params.get("cookies", {})
         no_dtls = params.get("no_dtls", False)
         username = params.get("username")
+        cached_usergroup = params.get("cached_usergroup")
 
-        # Find openconnect binary
-        openconnect_bin = None
-        for path in ["/opt/homebrew/bin/openconnect", "/usr/local/bin/openconnect", "/usr/bin/openconnect"]:
-            if os.path.exists(path):
-                openconnect_bin = path
-                break
+        openconnect_bin = find_openconnect()
         if not openconnect_bin:
             return {"success": False, "message": "openconnect not found"}
 
@@ -209,13 +270,26 @@ class VPNDaemon:
         if no_dtls:
             cmd.append("--no-dtls")
 
+        # Handle cookies based on protocol
         cookie_value = None
         if protocol == "gp":
-            if "portal_userauthcookie" in cookies:
+            if "portal-userauthcookie" in cookies:
+                cookie_value = cookies["portal-userauthcookie"]
+                cmd.extend(["--usergroup", "portal:portal-userauthcookie"])
+            elif "portal_userauthcookie" in cookies:
                 cookie_value = cookies["portal_userauthcookie"]
-                cmd.extend(["--cookie", cookie_value])
+                cmd.extend(["--usergroup", "portal:portal-userauthcookie"])
+            elif "prelogin-cookie" in cookies:
+                cmd.extend(["--usergroup", f"portal:{cached_usergroup or 'prelogin-cookie'}"])
+                cookie_value = cookies["prelogin-cookie"]
         else:
-            cookie_value = cookies.get("webvpn") or cookies.get("session_token")
+            # AnyConnect - check various cookie names
+            for key in ["webvpn", "SVPNCOOKIE", "session_token"]:
+                if key in cookies:
+                    cookie_value = cookies[key]
+                    break
+            if not cookie_value and cookies:
+                cookie_value = "; ".join([f"{k}={v}" for k, v in cookies.items()])
 
         cmd.append(address)
 
@@ -229,15 +303,24 @@ class VPNDaemon:
                 )
                 self._openconnect_proc.stdin.write((cookie_value + "\n").encode())
                 self._openconnect_proc.stdin.close()
+            elif cookie_value and protocol == "gp":
+                self._openconnect_proc = subprocess.Popen(
+                    cmd + ["--passwd-on-stdin"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                )
+                self._openconnect_proc.stdin.write((cookie_value + "\n").encode())
+                self._openconnect_proc.stdin.close()
             else:
                 self._openconnect_proc = subprocess.Popen(
                     cmd, stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 )
 
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
             if self._openconnect_proc.poll() is not None:
-                output = self._openconnect_proc.stdout.read().decode()[:200]
+                output = self._openconnect_proc.stdout.read().decode()[:500]
                 return {"success": False, "message": f"Failed: {output}"}
 
             self._current_connection = params.get("connection_name", address)
@@ -300,7 +383,10 @@ class VPNDaemon:
         )
         os.chmod(SOCKET_PATH, 0o666)
 
-        print(f"[Daemon] Started v{DAEMON_VERSION}, listening on {SOCKET_PATH}")
+        openconnect_bin = find_openconnect()
+        print(f"[Daemon] Started v{DAEMON_VERSION}")
+        print(f"[Daemon] Listening on {SOCKET_PATH}")
+        print(f"[Daemon] openconnect: {openconnect_bin or 'NOT FOUND'}")
 
         try:
             while self._running:
