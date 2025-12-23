@@ -14,6 +14,7 @@ override_dh_auto_install:
 	mkdir -p debian/ms-sso-openconnect-ui/opt/ms-sso-openconnect-ui
 	mkdir -p debian/ms-sso-openconnect-ui/usr/share/applications
 	mkdir -p debian/ms-sso-openconnect-ui/usr/share/icons/hicolor/256x256/apps
+	mkdir -p debian/ms-sso-openconnect-ui/usr/share/polkit-1/actions
 	mkdir -p debian/ms-sso-openconnect-ui/usr/bin
 
 	# Copy source files
@@ -24,6 +25,9 @@ override_dh_auto_install:
 	# Copy desktop file and icon
 	cp packaging/linux/desktop/ms-sso-openconnect-ui.desktop debian/ms-sso-openconnect-ui/usr/share/applications/
 	cp src/vpn_ui/resources/icons/app-icon.svg debian/ms-sso-openconnect-ui/usr/share/icons/hicolor/256x256/apps/ms-sso-openconnect-ui.svg
+
+	# Copy polkit policy for passwordless VPN
+	cp packaging/linux/polkit/org.openconnect.policy debian/ms-sso-openconnect-ui/usr/share/polkit-1/actions/
 
 override_dh_auto_test:
 	@echo "Skipping tests"
