@@ -1,4 +1,0 @@
-PyQt6>=6.5.0
-keyring>=24.0.0
-pyotp>=2.8.0
-playwright>=1.40.0
