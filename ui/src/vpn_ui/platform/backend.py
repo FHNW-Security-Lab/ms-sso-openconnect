@@ -117,22 +117,15 @@ class VPNBackend(SharedBackendMixin):
 
             # Handle cookies based on protocol
             cookie_value = None
-            gp_cookie_type = None
-
             if protocol == "gp":
-                # GlobalProtect - add GP-specific options
-                cmd_parts.extend(["--os=linux-64", "--useragent=PAN GlobalProtect"])
-
-                # Determine cookie and usergroup type
+                # GlobalProtect
                 if "prelogin-cookie" in cookies:
                     cookie_value = cookies["prelogin-cookie"]
-                    gp_cookie_type = "portal:prelogin-cookie"
+                    cmd_parts.extend(["--usergroup", "portal:prelogin-cookie"])
                 elif "portal-userauthcookie" in cookies:
                     cookie_value = cookies["portal-userauthcookie"]
-                    gp_cookie_type = "portal:portal-userauthcookie"
-
-                if gp_cookie_type:
-                    cmd_parts.append(f"--usergroup={gp_cookie_type}")
+                    cmd_parts.extend(["--usergroup", "portal:portal-userauthcookie"])
+                cmd_parts.extend(["--useragent", "PAN GlobalProtect", "--os=linux-64"])
             else:
                 # AnyConnect/other
                 cookie_value = cookies.get("webvpn") or cookies.get("session_token")
@@ -144,9 +137,7 @@ class VPNBackend(SharedBackendMixin):
 
             # Build shell command with cookie on stdin
             if cookie_value:
-                # GlobalProtect uses --passwd-on-stdin, AnyConnect uses --cookie-on-stdin
-                stdin_flag = "--passwd-on-stdin" if protocol == "gp" else "--cookie-on-stdin"
-                cmd_parts.append(stdin_flag)
+                cmd_parts.append("--cookie-on-stdin")
                 # Escape the command parts for shell
                 cmd_str = " ".join(shlex.quote(p) for p in cmd_parts)
                 # Create script that pipes cookie to openconnect
