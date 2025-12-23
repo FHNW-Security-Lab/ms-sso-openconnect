@@ -340,6 +340,45 @@ def do_saml_auth(
                         elif session_cookies:
                             context.close()
                             return session_cookies
+                    else:
+                        # Still on MS login - might need password after selecting account
+                        if debug:
+                            print(f"    [DEBUG] After account select, URL: {current_url[:60]}...")
+                            page.screenshot(path="/tmp/vpn-step2b-afterselect.png")
+
+                        # Check for password field (account selected but needs re-auth)
+                        password_field = _wait_for_password_field(page, debug, timeout=5)
+                        if password_field:
+                            print("  [3/6] Entering password...")
+                            password_field.fill(password)
+                            time.sleep(0.5)
+                            if debug:
+                                page.screenshot(path="/tmp/vpn-step3-password.png")
+                            _click_submit(page)
+                            page.wait_for_load_state("domcontentloaded")
+
+                            # Handle 2FA
+                            print("  [4/6] Handling 2FA...")
+                            time.sleep(3)
+                            if auto_totp and totp_secret:
+                                _handle_2fa(page, totp_secret, debug)
+
+                            # "Stay signed in?"
+                            print("  [5/6] Confirming login...")
+                            try:
+                                page.wait_for_selector("#idSIButton9", timeout=8000)
+                                page.click("#idSIButton9")
+                            except PWTimeout:
+                                pass
+
+                            page.wait_for_load_state("domcontentloaded")
+
+                            # Get cookies
+                            print("  [6/6] Collecting cookies...")
+                            try:
+                                page.wait_for_url(f"**{vpn_server}**", timeout=15000)
+                            except PWTimeout:
+                                pass
                 else:
                     # Click "Use another account" - try multiple selectors
                     print("  [2/6] Clicking 'Use another account'...")
