@@ -293,13 +293,16 @@ def do_saml_auth(
                         continue
 
                 if account_found:
-                    page.wait_for_load_state("domcontentloaded")
+                    page.wait_for_load_state("networkidle")
                     time.sleep(2)
 
                     # Check if clicking signed-in account completed auth (no password needed)
                     current_url = page.url
                     if vpn_server in current_url:
                         print("  -> Fast reconnect: account session still valid!")
+                        # Wait a bit more for response handlers to capture SAML data
+                        time.sleep(1)
+
                         all_cookies = context.cookies()
                         session_cookies = {}
                         for c in all_cookies:
@@ -307,13 +310,34 @@ def do_saml_auth(
                             name = c['name']
                             if (domain == vpn_server or domain == f'.{vpn_server}') and c.get('value'):
                                 session_cookies[name] = c['value']
+
+                        # Add captured SAML data
                         if saml_result['saml_response']:
                             session_cookies['SAMLResponse'] = saml_result['saml_response']
                         if saml_result['prelogin_cookie']:
                             session_cookies['prelogin-cookie'] = saml_result['prelogin_cookie']
+                        if saml_result['portal_userauthcookie']:
+                            session_cookies['portal-userauthcookie'] = saml_result['portal_userauthcookie']
+                        if saml_result['saml_username']:
+                            session_cookies['saml-username'] = saml_result['saml_username']
                         if gp_prelogin_cookie and 'prelogin-cookie' not in session_cookies:
                             session_cookies['prelogin-cookie'] = gp_prelogin_cookie
-                        if session_cookies:
+
+                        # For GlobalProtect, only return early if we have required cookies
+                        if protocol == "gp":
+                            has_gp_cookie = (
+                                session_cookies.get('prelogin-cookie') or
+                                session_cookies.get('portal-userauthcookie')
+                            )
+                            if has_gp_cookie:
+                                if debug:
+                                    print(f"    [DEBUG] Fast reconnect cookies: {list(session_cookies.keys())}")
+                                context.close()
+                                return session_cookies
+                            else:
+                                if debug:
+                                    print("    [DEBUG] No GP cookie found, continuing auth flow...")
+                        elif session_cookies:
                             context.close()
                             return session_cookies
                 else:
