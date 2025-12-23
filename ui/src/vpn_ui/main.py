@@ -202,6 +202,10 @@ class VPNApplication:
         Args:
             force: If True, terminate the session
         """
+        # Prevent double disconnect
+        if self._disconnecting:
+            return
+
         # Set flag to suppress errors during disconnect
         self._disconnecting = True
 
