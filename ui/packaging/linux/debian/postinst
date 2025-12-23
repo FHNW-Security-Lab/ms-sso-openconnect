@@ -1,0 +1,45 @@
+#!/bin/bash
+set -e
+
+INSTALL_DIR="/opt/ms-sso-openconnect-ui"
+
+case "$1" in
+    configure)
+        # Create virtual environment
+        python3 -m venv "$INSTALL_DIR/venv"
+
+        # Install dependencies
+        "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip wheel
+        "$INSTALL_DIR/venv/bin/pip" install --quiet PyQt6 keyring pyotp playwright secretstorage
+
+        # Install the package
+        "$INSTALL_DIR/venv/bin/pip" install --quiet "$INSTALL_DIR"
+
+        # Install Playwright browsers
+        PLAYWRIGHT_BROWSERS_PATH="$INSTALL_DIR/browsers" "$INSTALL_DIR/venv/bin/playwright" install chromium
+
+        # Create launcher script
+        cat > /usr/bin/ms-sso-openconnect-ui << 'EOF'
+#!/bin/bash
+INSTALL_DIR="/opt/ms-sso-openconnect-ui"
+export PLAYWRIGHT_BROWSERS_PATH="$INSTALL_DIR/browsers"
+export PYTHONPATH="$INSTALL_DIR:$PYTHONPATH"
+exec "$INSTALL_DIR/venv/bin/python" -m vpn_ui "$@"
+EOF
+        chmod +x /usr/bin/ms-sso-openconnect-ui
+
+        # Update icon cache
+        if command -v gtk-update-icon-cache &> /dev/null; then
+            gtk-update-icon-cache -f /usr/share/icons/hicolor/ 2>/dev/null || true
+        fi
+
+        # Update desktop database
+        if command -v update-desktop-database &> /dev/null; then
+            update-desktop-database /usr/share/applications/ 2>/dev/null || true
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

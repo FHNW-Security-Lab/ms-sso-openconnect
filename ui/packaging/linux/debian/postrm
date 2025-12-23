@@ -1,0 +1,22 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    purge|remove)
+        # Remove virtual environment and browsers
+        rm -rf /opt/ms-sso-openconnect-ui/venv
+        rm -rf /opt/ms-sso-openconnect-ui/browsers
+
+        # Remove launcher
+        rm -f /usr/bin/ms-sso-openconnect-ui
+
+        # Update icon cache
+        if command -v gtk-update-icon-cache &> /dev/null; then
+            gtk-update-icon-cache -f /usr/share/icons/hicolor/ 2>/dev/null || true
+        fi
+        ;;
+esac
+
+#DEBHELPER#
+
+exit 0

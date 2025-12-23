@@ -1,0 +1,29 @@
+Source: ms-sso-openconnect-ui
+Section: net
+Priority: optional
+Maintainer: MS SSO OpenConnect Maintainers <maintainers@example.com>
+Build-Depends: debhelper-compat (= 13),
+               python3,
+               python3-pip,
+               python3-venv
+Standards-Version: 4.6.0
+Homepage: https://github.com/FHNW-Security-Lab/ms-sso-openconnect
+
+Package: ms-sso-openconnect-ui
+Architecture: all
+Depends: ${misc:Depends},
+         python3 (>= 3.10),
+         python3-pip,
+         python3-venv,
+         openconnect,
+         libxcb-cursor0
+Recommends: gnome-keyring | kwalletmanager
+Description: Qt6 GUI for MS SSO OpenConnect VPN
+ A graphical user interface for connecting to VPN servers
+ using Microsoft SSO authentication.
+ .
+ Features:
+  - System tray integration
+  - Automatic TOTP code generation
+  - Secure credential storage in system keyring
+  - Support for Cisco AnyConnect and GlobalProtect
