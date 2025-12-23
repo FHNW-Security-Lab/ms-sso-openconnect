@@ -189,6 +189,15 @@ class VPNTrayIcon(QObject):
         """
         return self._current_connection
 
+    def set_disconnect_enabled(self, enabled: bool) -> None:
+        """Enable or disable disconnect actions.
+
+        Args:
+            enabled: Whether disconnect actions should be enabled
+        """
+        self._disconnect_action.setEnabled(enabled)
+        self._force_disconnect_action.setEnabled(enabled)
+
     def _update_icon(self) -> None:
         """Update the tray icon based on current status."""
         icon = self._icons.get(self._current_status, self._icons[STATUS_DISCONNECTED])

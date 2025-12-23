@@ -209,6 +209,9 @@ class VPNApplication:
         # Set flag to suppress errors during disconnect
         self._disconnecting = True
 
+        # Immediately disable disconnect actions to prevent double-click
+        self.tray.set_disconnect_enabled(False)
+
         if self._worker_thread and self._worker_thread.isRunning():
             # Cancel ongoing connection attempt
             self._worker_thread.cancel()
