@@ -21,6 +21,81 @@ from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 from .totp import generate_totp
 
 
+def _detect_desktop_user() -> Optional[str]:
+    """Detect the active desktop user when running as root.
+
+    This is used by the NM plugin which runs as root via D-Bus activation,
+    to find and use the desktop user's browser session for SSO continuity.
+
+    Returns:
+        Username of the active desktop user, or None if not found.
+    """
+    import subprocess
+    import glob
+
+    # Method 1: Check /run/user/* directories (most reliable on modern Linux)
+    # These directories are created by logind for each active user session
+    for user_dir in glob.glob("/run/user/*"):
+        try:
+            uid = int(os.path.basename(user_dir))
+            if uid >= 1000:  # Regular user UIDs start at 1000
+                import pwd
+                try:
+                    user = pwd.getpwuid(uid).pw_name
+                    # Verify this user has a browser session directory
+                    session_dir = f"/home/{user}/.cache/ms-sso-openconnect/browser-session"
+                    if os.path.isdir(session_dir):
+                        return user
+                except (KeyError, FileNotFoundError):
+                    continue
+        except (ValueError, OSError):
+            continue
+
+    # Method 2: Use loginctl to find graphical session owner
+    try:
+        result = subprocess.run(
+            ["loginctl", "list-sessions", "--no-legend"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().split('\n'):
+                parts = line.split()
+                if len(parts) >= 3:
+                    session_id = parts[0]
+                    user = parts[2]
+                    # Check if this is a graphical session
+                    type_result = subprocess.run(
+                        ["loginctl", "show-session", session_id, "-p", "Type"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    if "x11" in type_result.stdout or "wayland" in type_result.stdout:
+                        return user
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+
+    # Method 3: Check who owns the display
+    try:
+        result = subprocess.run(
+            ["who"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        if result.returncode == 0:
+            for line in result.stdout.strip().split('\n'):
+                if "(:0)" in line or "(:" in line:  # X11 display
+                    user = line.split()[0]
+                    return user
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        pass
+
+    return None
+
+
 def _get_gp_prelogin(server: str, debug: bool = False) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """Get prelogin-cookie from GlobalProtect prelogin.esp.
 
@@ -101,6 +176,16 @@ def do_saml_auth(
     # Ensure Playwright uses real user's browser cache
     real_user = os.environ.get("SUDO_USER", os.environ.get("USER", "root"))
     home = os.path.expanduser("~")
+
+    # If running as root without SUDO_USER (e.g., NM plugin via D-Bus),
+    # try to find the active desktop user
+    if real_user == "root":
+        detected_user = _detect_desktop_user()
+        if detected_user:
+            real_user = detected_user
+            if debug:
+                print(f"    [DEBUG] Detected desktop user: {real_user}")
+
     if real_user != "root":
         try:
             import pwd
@@ -162,6 +247,7 @@ def do_saml_auth(
             if vpn_server in request.url:
                 if debug:
                     print(f"    [DEBUG] Request to VPN: {request.url[:80]}...")
+                    print(f"    [DEBUG] Request method: {request.method}")
                 if request.post_data:
                     try:
                         params = urllib.parse.parse_qs(request.post_data)
@@ -186,10 +272,10 @@ def do_saml_auth(
                 headers = response.headers
                 if debug:
                     print(f"    [DEBUG] Response from VPN: {response.url[:80]}... status={response.status}")
-                    # Log GP-related headers
-                    for h in ["prelogin-cookie", "saml-username", "portal-userauthcookie", "set-cookie"]:
+                    # Log all relevant headers
+                    for h in ["prelogin-cookie", "saml-username", "portal-userauthcookie", "set-cookie", "location"]:
                         if h in headers:
-                            val = headers[h][:50] if len(headers[h]) > 50 else headers[h]
+                            val = headers[h][:80] if len(headers[h]) > 80 else headers[h]
                             print(f"    [DEBUG] Header {h}: {val}...")
                 if "prelogin-cookie" in headers:
                     saml_result["prelogin_cookie"] = headers["prelogin-cookie"]
@@ -337,6 +423,21 @@ def do_saml_auth(
                             else:
                                 if debug:
                                     print("    [DEBUG] No GP cookie found, continuing auth flow...")
+                        elif protocol == "anyconnect":
+                            # AnyConnect needs webvpn/SVPNCOOKIE or SAMLResponse
+                            has_anyconnect_cookie = (
+                                session_cookies.get('webvpn') or
+                                session_cookies.get('SVPNCOOKIE') or
+                                saml_result.get('saml_response')
+                            )
+                            if has_anyconnect_cookie:
+                                if debug:
+                                    print(f"    [DEBUG] Fast reconnect cookies: {list(session_cookies.keys())}")
+                                context.close()
+                                return session_cookies
+                            else:
+                                if debug:
+                                    print("    [DEBUG] No AnyConnect auth cookie found, continuing auth flow...")
                         elif session_cookies:
                             context.close()
                             return session_cookies
@@ -374,6 +475,40 @@ def do_saml_auth(
                             page.wait_for_load_state("domcontentloaded")
 
                             # Get cookies
+                            print("  [6/6] Collecting cookies...")
+                            try:
+                                page.wait_for_url(f"**{vpn_server}**", timeout=15000)
+                            except PWTimeout:
+                                pass
+                        else:
+                            # No password field - MS session remembered, but may need 2FA
+                            print("  [3/6] Password skipped (session remembered)")
+                            if debug:
+                                page.screenshot(path="/tmp/vpn-step3-nopwd-mfa.png")
+                                print(f"    [DEBUG] No password field, current URL: {page.url[:60]}...")
+
+                            # Handle 2FA - MS may skip password but still require 2FA
+                            print("  [4/6] Checking for 2FA...")
+                            time.sleep(2)
+                            if debug:
+                                page.screenshot(path="/tmp/vpn-step4-before-2fa.png")
+                            if auto_totp and totp_secret:
+                                _handle_2fa(page, totp_secret, debug)
+                            if debug:
+                                time.sleep(2)
+                                page.screenshot(path="/tmp/vpn-step4-after-2fa.png")
+
+                            # "Stay signed in?"
+                            print("  [5/6] Confirming login...")
+                            try:
+                                page.wait_for_selector("#idSIButton9", timeout=8000)
+                                page.click("#idSIButton9")
+                            except PWTimeout:
+                                pass
+
+                            page.wait_for_load_state("domcontentloaded")
+
+                            # Wait for redirect to VPN
                             print("  [6/6] Collecting cookies...")
                             try:
                                 page.wait_for_url(f"**{vpn_server}**", timeout=15000)
@@ -585,6 +720,43 @@ def do_saml_auth(
                       f"saml_response={saml_result['saml_response'] is not None}, "
                       f"portal_userauthcookie={saml_result['portal_userauthcookie'] is not None}")
 
+            # Final validation: ensure we have proper auth cookies for the protocol
+            if protocol == "anyconnect":
+                has_valid_cookie = (
+                    vpn_cookies.get('webvpn') or
+                    vpn_cookies.get('SVPNCOOKIE') or
+                    vpn_cookies.get('SAMLResponse')
+                )
+                if not has_valid_cookie:
+                    if debug:
+                        print("    [DEBUG] WARNING: No valid AnyConnect auth cookie found!")
+                        print(f"    [DEBUG] Got cookies: {list(vpn_cookies.keys())}")
+                        # Write debug info to file for NM plugin debugging
+                        try:
+                            import json
+                            with open('/tmp/nm-vpn-auth-debug.json', 'w') as f:
+                                json.dump({
+                                    'error': 'No valid AnyConnect auth cookie',
+                                    'cookies': list(vpn_cookies.keys()),
+                                    'saml_response': saml_result['saml_response'] is not None,
+                                    'prelogin_cookie': saml_result['prelogin_cookie'] is not None,
+                                }, f, indent=2)
+                        except Exception:
+                            pass
+                    # Return None to indicate auth failure rather than returning bad cookies
+                    context.close()
+                    return None
+            elif protocol == "gp":
+                has_valid_cookie = (
+                    vpn_cookies.get('prelogin-cookie') or
+                    vpn_cookies.get('portal-userauthcookie')
+                )
+                if not has_valid_cookie:
+                    if debug:
+                        print("    [DEBUG] WARNING: No valid GlobalProtect auth cookie found!")
+                    context.close()
+                    return None
+
             context.close()
             return vpn_cookies if vpn_cookies else None
 
@@ -668,6 +840,9 @@ def _wait_for_password_field(page, debug: bool, timeout: int = 30):
 
 def _handle_2fa(page, totp_secret: str, debug: bool):
     """Handle 2FA code entry."""
+    if debug:
+        print("    [DEBUG] _handle_2fa called")
+
     otp_selectors = [
         "#idTxtBx_SAOTCC_OTC", 'input[name="otc"]',
         'input[placeholder*="code"]', 'input[aria-label*="code"]',
@@ -678,6 +853,8 @@ def _handle_2fa(page, totp_secret: str, debug: bool):
             try:
                 inp = page.query_selector(s)
                 if inp and inp.is_visible():
+                    if debug:
+                        print(f"    [DEBUG] Found OTP input with selector: {s}")
                     return inp
             except Exception:
                 continue
@@ -692,10 +869,14 @@ def _handle_2fa(page, totp_secret: str, debug: bool):
             try:
                 btn = page.query_selector(s)
                 if btn and btn.is_visible():
+                    if debug:
+                        print(f"    [DEBUG] Clicking submit with selector: {s}")
                     btn.click(force=True)
                     return
             except Exception:
                 continue
+        if debug:
+            print("    [DEBUG] No submit button found, pressing Enter")
         page.keyboard.press("Enter")
 
     # Try direct OTP input
@@ -704,44 +885,74 @@ def _handle_2fa(page, totp_secret: str, debug: bool):
         enter_code(otp)
         return
 
+    if debug:
+        print("    [DEBUG] No direct OTP input found, trying alternative flows...")
+
     # Try "Sign in another way" flow
     step1_selectors = [
         "#signInAnotherWay", 'a:has-text("I can\'t use my Microsoft Authenticator")',
         'a:has-text("Sign in another way")', "#idA_SAASTO_LookupLink",
     ]
 
+    clicked_step1 = False
     for sel in step1_selectors:
         try:
             link = page.query_selector(sel)
             if link and link.is_visible():
+                if debug:
+                    print(f"    [DEBUG] Clicking 'Sign in another way': {sel}")
                 link.click(force=True)
+                clicked_step1 = True
                 time.sleep(0.8)
                 break
         except Exception:
             continue
+
+    if debug and not clicked_step1:
+        print("    [DEBUG] No 'Sign in another way' link found")
 
     otp = find_otp()
     if otp:
         enter_code(otp)
         return
 
-    # Try selecting TOTP option
+    # Try selecting TOTP option - expanded selectors
     step2_selectors = [
         'div[data-value="PhoneAppOTP"]',
         'div:has-text("verification code")',
         'div:has-text("Use a verification code")',
+        '#idDiv_SAOTCC_Description',
+        'div[role="button"]:has-text("verification")',
+        'button:has-text("verification")',
     ]
 
+    if debug:
+        print("    [DEBUG] Trying to click TOTP option...")
+
+    clicked_step2 = False
     for sel in step2_selectors:
         try:
             opt = page.query_selector(sel)
             if opt and opt.is_visible():
+                if debug:
+                    print(f"    [DEBUG] Clicking TOTP option: {sel}")
                 opt.click(force=True)
+                clicked_step2 = True
                 time.sleep(0.8)
                 break
-        except Exception:
+        except Exception as e:
+            if debug:
+                print(f"    [DEBUG] Selector {sel} failed: {e}")
             continue
+
+    if debug and not clicked_step2:
+        print("    [DEBUG] WARNING: Could not click any TOTP option!")
+        page.screenshot(path="/tmp/vpn-2fa-noclick.png")
 
     otp = find_otp()
     if otp:
         enter_code(otp)
+    else:
+        if debug:
+            print("    [DEBUG] WARNING: Still no OTP input found after clicking options!")
+            page.screenshot(path="/tmp/vpn-2fa-nootp.png")
