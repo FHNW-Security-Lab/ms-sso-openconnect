@@ -8,7 +8,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 PACKAGE_NAME="network-manager-ms-sso"
-VERSION="1.0.0"
+VERSION="2.0.0"
 
 echo "=== Building Debian Package for $PACKAGE_NAME ==="
 echo ""
