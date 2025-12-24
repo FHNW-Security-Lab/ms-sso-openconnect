@@ -12,8 +12,14 @@ case "$1" in
         "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip wheel
         "$INSTALL_DIR/venv/bin/pip" install --quiet PyQt6 keyring pyotp playwright secretstorage
 
-        # Install the package (force reinstall to update cached bytecode)
-        "$INSTALL_DIR/venv/bin/pip" install --quiet --force-reinstall --no-deps "$INSTALL_DIR"
+        # Uninstall old package completely (removes both vpn_ui and dist-info)
+        "$INSTALL_DIR/venv/bin/pip" uninstall -y ms-sso-openconnect-ui 2>/dev/null || true
+
+        # Remove stale build cache to force rebuild from fresh source
+        rm -rf "$INSTALL_DIR/build"
+
+        # Install the package fresh
+        "$INSTALL_DIR/venv/bin/pip" install --quiet --no-cache-dir "$INSTALL_DIR"
 
         # Install Playwright browsers
         PLAYWRIGHT_BROWSERS_PATH="$INSTALL_DIR/browsers" "$INSTALL_DIR/venv/bin/playwright" install chromium
