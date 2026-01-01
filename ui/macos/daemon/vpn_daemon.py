@@ -294,7 +294,7 @@ class VPNDaemon:
 
     def _signal_handler(self, signum, frame):
         """Handle termination signals."""
-        print(f"[Daemon] Received signal {signum}, shutting down...", file=sys.stderr)
+        print(f"[Daemon] Signal {signum}, shutting down...", file=sys.stderr)
         self._running = False
 
         # Gracefully disconnect if connected
@@ -305,6 +305,9 @@ class VPNDaemon:
                 self._openconnect_proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self._openconnect_proc.kill()
+
+        # Force exit to avoid stuck state with asyncio
+        sys.exit(0)
 
     async def run(self):
         """Run the daemon."""

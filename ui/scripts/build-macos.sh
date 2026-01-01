@@ -428,11 +428,26 @@ cat > "$SCRIPTS_DIR/postinstall" << 'POSTINSTALL'
 mkdir -p /var/run/ms-sso-openconnect
 chmod 755 /var/run/ms-sso-openconnect
 
-# Load the daemon
-launchctl load /Library/LaunchDaemons/com.github.ms-sso-openconnect.daemon.plist 2>/dev/null || true
+# Use modern launchctl commands (bootstrap/bootout instead of deprecated load/unload)
+# Try to stop any existing daemon first
+launchctl bootout system/com.github.ms-sso-openconnect.daemon 2>/dev/null || true
 
-echo "MS SSO OpenConnect installed successfully."
-echo "The VPN daemon is now running."
+# Give it a moment to fully stop
+sleep 1
+
+# Start the daemon using bootstrap (modern macOS 10.10+)
+launchctl bootstrap system /Library/LaunchDaemons/com.github.ms-sso-openconnect.daemon.plist 2>/dev/null || \
+    launchctl load /Library/LaunchDaemons/com.github.ms-sso-openconnect.daemon.plist 2>/dev/null || true
+
+# Verify daemon is running
+sleep 2
+if launchctl list com.github.ms-sso-openconnect.daemon &>/dev/null; then
+    echo "MS SSO OpenConnect installed successfully."
+    echo "The VPN daemon is now running."
+else
+    echo "Warning: VPN daemon may not have started. Try rebooting or run:"
+    echo "  sudo launchctl bootstrap system /Library/LaunchDaemons/com.github.ms-sso-openconnect.daemon.plist"
+fi
 exit 0
 POSTINSTALL
 chmod +x "$SCRIPTS_DIR/postinstall"
@@ -440,8 +455,15 @@ chmod +x "$SCRIPTS_DIR/postinstall"
 # Preinstall script (stop existing daemon)
 cat > "$SCRIPTS_DIR/preinstall" << 'PREINSTALL'
 #!/bin/bash
-# Stop existing daemon if running
-launchctl unload /Library/LaunchDaemons/com.github.ms-sso-openconnect.daemon.plist 2>/dev/null || true
+# Stop existing daemon if running (using modern bootout, fallback to legacy unload)
+launchctl bootout system/com.github.ms-sso-openconnect.daemon 2>/dev/null || \
+    launchctl unload /Library/LaunchDaemons/com.github.ms-sso-openconnect.daemon.plist 2>/dev/null || true
+
+# Also kill any orphaned daemon process
+pkill -9 -f "ms-sso-openconnect-daemon" 2>/dev/null || true
+
+# Clean up stale socket
+rm -f /var/run/ms-sso-openconnect/daemon.sock 2>/dev/null || true
 exit 0
 PREINSTALL
 chmod +x "$SCRIPTS_DIR/preinstall"
