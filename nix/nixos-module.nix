@@ -6,6 +6,11 @@ let
   resolvectlBin = lib.getExe' pkgs.systemd "resolvectl";
   grepBin = lib.getExe' pkgs.gnugrep "grep";
   awkBin = lib.getExe' pkgs.gawk "awk";
+  hasNmMsSso = lib.hasAttr "networkmanager-ms-sso" pkgs;
+  autoEnable = cfg.autoEnable
+    && hasNmMsSso
+    && lib.elem pkgs.networkmanager-ms-sso config.environment.systemPackages;
+  enabled = cfg.enable || autoEnable;
   cleanupScript = pkgs.writeShellScript "nm-ms-sso-cleanup" ''
     iface="''${VPN_IP_IFACE:-''${DEVICE_IFACE:-$1}}"
     event="$2"
@@ -54,19 +59,25 @@ in
       default = true;
       description = "Clean up DNS entries on VPN disconnect.";
     };
+
+    autoEnable = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Auto-enable the module when networkmanager-ms-sso is in environment.systemPackages.";
+    };
   };
 
-  config = lib.mkIf cfg.enable {
+  config = {
     nixpkgs.overlays = lib.optionals cfg.withOverlay [
       (import ./overlay.nix)
     ];
 
-    networking.networkmanager.plugins = lib.mkAfter [
-      pkgs.networkmanager-ms-sso
-    ];
-
     environment.systemPackages = lib.optionals cfg.withUi [
       pkgs.ms-sso-openconnect-ui
+    ];
+  } // lib.mkIf enabled {
+    networking.networkmanager.plugins = lib.mkAfter [
+      pkgs.networkmanager-ms-sso
     ];
 
     systemd.services.NetworkManager.serviceConfig.ExecStartPre =

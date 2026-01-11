@@ -85,6 +85,16 @@ optionally the UI):
 }
 ```
 
+Minimal usage (module auto-enables when the package is installed):
+
+```nix
+{
+  imports = [ /path/to/ms-sso-openconnect/nix/nixos-module.nix ];
+
+  environment.systemPackages = [ pkgs.networkmanager-ms-sso ];
+}
+```
+
 Using GitHub instead of a local checkout (pinned commit):
 
 ```nix
@@ -117,6 +127,7 @@ Notes:
   (`pkgs.networkmanager-ms-sso`) independently.
 - If you upgrade and still see `/home/...` read-only errors, a stale `nm-ms-sso-service` process may be running; reboot or run `sudo pkill -f nm-ms-sso-service` once (the module sets `autoKillStale = true`).
 - The module cleans up resolvconf DNS entries on VPN disconnect by default; set `autoCleanupDns = false` to disable.
+- The module enables itself automatically when `networkmanager-ms-sso` is present in `environment.systemPackages` (set `autoEnable = false` to disable).
 
 ### Option 4: Command-Line Tool
 
