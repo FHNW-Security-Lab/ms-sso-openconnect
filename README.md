@@ -85,13 +85,13 @@ optionally the UI):
 }
 ```
 
-Minimal usage (module auto-enables when the package is installed):
+Minimal usage (module):
 
 ```nix
 {
   imports = [ /path/to/ms-sso-openconnect/nix/nixos-module.nix ];
 
-  environment.systemPackages = [ pkgs.networkmanager-ms-sso ];
+  services.ms-sso-openconnect.enable = true;
 }
 ```
 
@@ -100,7 +100,7 @@ Using GitHub instead of a local checkout (pinned commit):
 ```nix
 let
   msSso = builtins.fetchTarball {
-    url = "https://github.com/FHNW-Security-Lab/ms-sso-openconnect/archive/65be564.tar.gz";
+    url = "https://github.com/FHNW-Security-Lab/ms-sso-openconnect/archive/REV.tar.gz";
     # sha256 = "...";
   };
 in
@@ -116,7 +116,7 @@ in
 
 To get the sha256:
 ```bash
-nix store prefetch-file --hash-type sha256 https://github.com/FHNW-Security-Lab/ms-sso-openconnect/archive/65be564.tar.gz
+nix store prefetch-file --hash-type sha256 https://github.com/FHNW-Security-Lab/ms-sso-openconnect/archive/REV.tar.gz
 ```
 
 Notes:
@@ -127,7 +127,7 @@ Notes:
   (`pkgs.networkmanager-ms-sso`) independently.
 - If you upgrade and still see `/home/...` read-only errors, a stale `nm-ms-sso-service` process may be running; reboot or run `sudo pkill -f nm-ms-sso-service` once (the module sets `autoKillStale = true`).
 - The module cleans up resolvconf DNS entries on VPN disconnect by default; set `autoCleanupDns = false` to disable.
-- The module enables itself automatically when `networkmanager-ms-sso` is present in `environment.systemPackages` (set `autoEnable = false` to disable).
+- The module does not auto-enable; set `services.ms-sso-openconnect.enable = true;` when using it.
 
 ### Option 4: Command-Line Tool
 
