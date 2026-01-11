@@ -16,7 +16,7 @@ let
           if [ -n "$iface" ]; then
             ${resolvconfBin} -d "$iface" || true
           fi
-          ${resolvconfBin} -l | ${awkBin} '/^# resolv.conf from /{print $5}' | ${grepBin} '^tun' | while read -r dev; do
+          ${resolvconfBin} -l | ${awkBin} '/^# resolv.conf from /{print $NF}' | ${grepBin} '^tun' | while read -r dev; do
             [ -n "$dev" ] && ${resolvconfBin} -d "$dev" || true
           done
           ${resolvconfBin} -u || true
