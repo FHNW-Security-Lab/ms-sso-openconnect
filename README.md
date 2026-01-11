@@ -85,6 +85,30 @@ optionally the UI):
 }
 ```
 
+Using GitHub instead of a local checkout (pinned commit):
+
+```nix
+let
+  msSso = builtins.fetchTarball {
+    url = "https://github.com/FHNW-Security-Lab/ms-sso-openconnect/archive/65be564.tar.gz";
+    # sha256 = "...";
+  };
+in
+{
+  imports = [ "${msSso}/nix/nixos-module.nix" ];
+
+  services.ms-sso-openconnect = {
+    enable = true;
+    withUi = true; # optional
+  };
+}
+```
+
+To get the sha256:
+```bash
+nix store prefetch-file --hash-type sha256 https://github.com/FHNW-Security-Lab/ms-sso-openconnect/archive/65be564.tar.gz
+```
+
 Notes:
 - Ensure NetworkManager is enabled (`networking.networkmanager.enable = true;`) if it is not already.
 - The UI package creates a `~/.cache/ms-playwright` symlink to the packaged browsers on first run.
@@ -92,6 +116,7 @@ Notes:
 - You can install just the UI (`pkgs.ms-sso-openconnect-ui`) or just the NM plugin
   (`pkgs.networkmanager-ms-sso`) independently.
 - If you upgrade and still see `/home/...` read-only errors, a stale `nm-ms-sso-service` process may be running; reboot or run `sudo pkill -f nm-ms-sso-service` once (the module sets `autoKillStale = true`).
+- The module cleans up resolvconf DNS entries on VPN disconnect by default; set `autoCleanupDns = false` to disable.
 
 ### Option 4: Command-Line Tool
 
