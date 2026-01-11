@@ -55,79 +55,33 @@ After installation:
 
 **Note:** This option is for GNOME desktop users who prefer native NetworkManager integration.
 
-### Option 3: NixOS (UI + GNOME NetworkManager Plugin)
+### Option 3: NixOS (GNOME NetworkManager Plugin)
 
-Add the local overlay and enable the packages in `/etc/nixos/configuration.nix`:
-
-```nix
-{ config, pkgs, ... }:
-{
-  nixpkgs.overlays = [ (import /path/to/ms-sso-openconnect/nix/overlay.nix) ];
-
-  networking.networkmanager.enable = true;
-  networking.networkmanager.plugins = [ pkgs.networkmanager-ms-sso ];
-
-  environment.systemPackages = [ pkgs.ms-sso-openconnect-ui ];
-}
-```
-
-Alternatively, import the helper module to wire up the overlay and plugin (and
-optionally the UI):
-
-```nix
-{
-  imports = [ /path/to/ms-sso-openconnect/nix/nixos-module.nix ];
-
-  services.ms-sso-openconnect = {
-    enable = true;
-    withUi = true; # optional
-  };
-}
-```
-
-Minimal usage (module):
-
-```nix
-{
-  imports = [ /path/to/ms-sso-openconnect/nix/nixos-module.nix ];
-
-  services.ms-sso-openconnect.enable = true;
-}
-```
-
-Using GitHub instead of a local checkout (pinned commit):
+Add this to `/etc/nixos/configuration.nix`:
 
 ```nix
 let
   msSso = builtins.fetchTarball {
-    url = "https://github.com/FHNW-Security-Lab/ms-sso-openconnect/archive/REV.tar.gz";
-    # sha256 = "...";
+    url = "https://github.com/FHNW-Security-Lab/ms-sso-openconnect/archive/a10badc.tar.gz";
   };
 in
 {
-  imports = [ "${msSso}/nix/nixos-module.nix" ];
+  imports = [ (import "${msSso}/nix/nixos-module.nix") ];
 
-  services.ms-sso-openconnect = {
-    enable = true;
-    withUi = true; # optional
-  };
+  networking.networkmanager.enable = true;
+  nixpkgs.overlays = [ (import "${msSso}/nix/overlay.nix") ];
+  services.ms-sso-openconnect.enable = true;
+
+  environment.systemPackages = with pkgs; [
+    networkmanager-ms-sso
+  ];
 }
 ```
 
-To get the sha256:
+Rebuild:
 ```bash
-nix store prefetch-file --hash-type sha256 https://github.com/FHNW-Security-Lab/ms-sso-openconnect/archive/REV.tar.gz
+sudo nixos-rebuild switch
 ```
-
-Notes:
-- Ensure NetworkManager is enabled (`networking.networkmanager.enable = true;`) if it is not already.
-- The UI package creates a `~/.cache/ms-playwright` symlink to the packaged browsers on first run.
-- The NetworkManager plugin provides `/var/cache/ms-playwright` for root runs.
-- You can install just the UI (`pkgs.ms-sso-openconnect-ui`) or just the NM plugin
-  (`pkgs.networkmanager-ms-sso`) independently.
-- If you upgrade and still see `/home/...` read-only errors, a stale `nm-ms-sso-service` process may be running; reboot or run `sudo pkill -f nm-ms-sso-service` once (the module sets `autoKillStale = true`).
-- The module cleans up resolvconf DNS entries on VPN disconnect by default; set `autoCleanupDns = false` to disable.
-- The module does not auto-enable; set `services.ms-sso-openconnect.enable = true;` when using it.
 
 ### Option 4: Command-Line Tool
 
