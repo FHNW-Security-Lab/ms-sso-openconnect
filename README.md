@@ -55,7 +55,45 @@ After installation:
 
 **Note:** This option is for GNOME desktop users who prefer native NetworkManager integration.
 
-### Option 3: Command-Line Tool
+### Option 3: NixOS (UI + GNOME NetworkManager Plugin)
+
+Add the local overlay and enable the packages in `/etc/nixos/configuration.nix`:
+
+```nix
+{ config, pkgs, ... }:
+{
+  nixpkgs.overlays = [ (import /path/to/ms-sso-openconnect/nix/overlay.nix) ];
+
+  networking.networkmanager.enable = true;
+  networking.networkmanager.plugins = [ pkgs.networkmanager-ms-sso ];
+
+  environment.systemPackages = [ pkgs.ms-sso-openconnect-ui ];
+}
+```
+
+Alternatively, import the helper module to wire up the overlay and plugin (and
+optionally the UI):
+
+```nix
+{
+  imports = [ /path/to/ms-sso-openconnect/nix/nixos-module.nix ];
+
+  services.ms-sso-openconnect = {
+    enable = true;
+    withUi = true; # optional
+  };
+}
+```
+
+Notes:
+- Ensure NetworkManager is enabled (`networking.networkmanager.enable = true;`) if it is not already.
+- The UI package creates a `~/.cache/ms-playwright` symlink to the packaged browsers on first run.
+- The NetworkManager plugin provides `/var/cache/ms-playwright` for root runs.
+- You can install just the UI (`pkgs.ms-sso-openconnect-ui`) or just the NM plugin
+  (`pkgs.networkmanager-ms-sso`) independently.
+- If you upgrade and still see `/home/...` read-only errors, a stale `nm-ms-sso-service` process may be running; reboot or run `sudo pkill -f nm-ms-sso-service` once (the module sets `autoKillStale = true`).
+
+### Option 4: Command-Line Tool
 
 For headless servers, scripting, or users who prefer the terminal.
 
