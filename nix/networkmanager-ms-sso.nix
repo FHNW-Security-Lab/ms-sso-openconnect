@@ -102,7 +102,7 @@ python3Packages.buildPythonApplication rec {
     networkManagerPlugin = "VPN/nm-ms-sso-service.name";
     networkManagerRuntimeDeps = [ openconnect vpnc-scripts iproute2 procps ];
     networkManagerTmpfilesRules = [
-      "L /var/cache/ms-playwright - - - - ${playwright-driver.browsers}"
+      "L+ /var/cache/ms-playwright - - - - ${playwright-driver.browsers}"
       "d /var/cache/ms-sso-openconnect 0755 root root -"
     ];
   };
