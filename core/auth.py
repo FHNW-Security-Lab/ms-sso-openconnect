@@ -160,7 +160,19 @@ def do_saml_auth(
     Returns:
         Dict with cookies/tokens or None on failure
     """
-    vpn_url = f"https://{vpn_server}"
+    # Normalize server so we can:
+    # - build correct URLs even if the gateway contains a port or scheme
+    # - match cookies set for parent domains (e.g. ".example.com") reliably
+    vpn_server_raw = vpn_server
+    try:
+        parsed_server = urllib.parse.urlparse(vpn_server_raw if "://" in vpn_server_raw else f"//{vpn_server_raw}")
+        vpn_server_host = parsed_server.hostname or vpn_server_raw
+        vpn_server_netloc = parsed_server.netloc or vpn_server_raw
+    except Exception:
+        vpn_server_host = vpn_server_raw
+        vpn_server_netloc = vpn_server_raw
+
+    vpn_url = f"https://{vpn_server_netloc}"
 
     # Protocol-specific setup
     gp_prelogin_cookie, gp_saml_request, gp_gateway_ip = None, None, None
@@ -243,8 +255,28 @@ def do_saml_auth(
             "portal_userauthcookie": None,
         }
 
+        allowed_hosts = {vpn_server_host}
+        if gp_gateway_ip:
+            allowed_hosts.add(gp_gateway_ip)
+
+        def _is_vpn_url(url: str) -> bool:
+            try:
+                host = urllib.parse.urlparse(url).hostname
+            except Exception:
+                host = None
+            if host and host in allowed_hosts:
+                return True
+            # Fallback: substring match for unusual URL formats
+            return any(h and h in url for h in allowed_hosts)
+
+        def _cookie_domain_matches(domain: str) -> bool:
+            domain_no_dot = (domain or "").lstrip(".")
+            return bool(domain_no_dot) and (
+                domain_no_dot == vpn_server_host or vpn_server_host.endswith(f".{domain_no_dot}")
+            )
+
         def handle_request(request):
-            if vpn_server in request.url:
+            if _is_vpn_url(request.url):
                 if debug:
                     print(f"    [DEBUG] Request to VPN: {request.url[:80]}...")
                     print(f"    [DEBUG] Request method: {request.method}")
@@ -266,7 +298,7 @@ def do_saml_auth(
                             print(f"    [DEBUG] Error parsing POST: {e}")
 
         def handle_response(response):
-            if vpn_server not in response.url:
+            if not _is_vpn_url(response.url):
                 return
             try:
                 headers = response.headers
@@ -299,7 +331,7 @@ def do_saml_auth(
                 except Exception:
                     start_url = vpn_url
             elif protocol == "anyconnect":
-                start_url = f"https://{vpn_server}/+CSCOE+/saml/sp/login?tgname=DefaultWEBVPNGroup"
+                start_url = f"https://{vpn_server_netloc}/+CSCOE+/saml/sp/login?tgname=DefaultWEBVPNGroup"
             else:
                 start_url = vpn_url
 
@@ -313,13 +345,13 @@ def do_saml_auth(
             # Check if already authenticated (SSO session valid)
             time.sleep(1)
             current_url = page.url
-            if vpn_server in current_url:
+            if _is_vpn_url(current_url):
                 all_cookies = context.cookies()
                 session_cookies = {}
                 for c in all_cookies:
                     domain = c.get('domain', '')
                     name = c['name']
-                    if (domain == vpn_server or domain == f'.{vpn_server}') and c.get('value'):
+                    if c.get('value') and _cookie_domain_matches(domain):
                         session_cookies[name] = c['value']
 
                 has_session = (
@@ -384,7 +416,7 @@ def do_saml_auth(
 
                     # Check if clicking signed-in account completed auth (no password needed)
                     current_url = page.url
-                    if vpn_server in current_url:
+                    if _is_vpn_url(current_url):
                         print("  -> Fast reconnect: account session still valid!")
                         # Wait a bit more for response handlers to capture SAML data
                         time.sleep(1)
@@ -394,7 +426,7 @@ def do_saml_auth(
                         for c in all_cookies:
                             domain = c.get('domain', '')
                             name = c['name']
-                            if (domain == vpn_server or domain == f'.{vpn_server}') and c.get('value'):
+                            if c.get('value') and _cookie_domain_matches(domain):
                                 session_cookies[name] = c['value']
 
                         # Add captured SAML data
@@ -477,7 +509,7 @@ def do_saml_auth(
                             # Get cookies
                             print("  [6/6] Collecting cookies...")
                             try:
-                                page.wait_for_url(f"**{vpn_server}**", timeout=15000)
+                                page.wait_for_url(f"**{vpn_server_host}**", timeout=15000)
                             except PWTimeout:
                                 pass
                         else:
@@ -511,7 +543,7 @@ def do_saml_auth(
                             # Wait for redirect to VPN
                             print("  [6/6] Collecting cookies...")
                             try:
-                                page.wait_for_url(f"**{vpn_server}**", timeout=15000)
+                                page.wait_for_url(f"**{vpn_server_host}**", timeout=15000)
                             except PWTimeout:
                                 pass
                 else:
@@ -672,7 +704,7 @@ def do_saml_auth(
                 # Step 6: Get cookies
                 print("  [6/6] Collecting cookies...")
                 try:
-                    page.wait_for_url(f"**{vpn_server}**", timeout=15000)
+                    page.wait_for_url(f"**{vpn_server_host}**", timeout=15000)
                 except PWTimeout:
                     pass
 
@@ -682,7 +714,7 @@ def do_saml_auth(
             if debug:
                 print(f"    [DEBUG] Browser cookies ({len(cookies)} total):")
                 for c in cookies:
-                    if vpn_server in c.get("domain", ""):
+                    if _cookie_domain_matches(c.get("domain", "")):
                         print(f"      - {c['name']}: {str(c['value'])[:30]}... (domain={c.get('domain')})")
 
             # Filter VPN cookies
@@ -693,7 +725,7 @@ def do_saml_auth(
                 name, domain = c["name"], c.get("domain", "")
                 if name.lower() in [n.lower() for n in gp_names]:
                     vpn_cookies[name] = c["value"]
-                elif domain == vpn_server or domain == f".{vpn_server}":
+                elif _cookie_domain_matches(domain):
                     vpn_cookies[name] = c["value"]
 
             # Add captured SAML data
