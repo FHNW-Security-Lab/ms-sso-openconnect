@@ -9,6 +9,7 @@ Combines:
 
 import base64
 import os
+import re
 import ssl
 import time
 import urllib.parse
@@ -144,6 +145,7 @@ def do_saml_auth(
     auto_totp: bool = True,
     headless: bool = True,
     debug: bool = False,
+    vpn_server_ip: Optional[str] = None,
 ) -> Optional[dict]:
     """Complete Microsoft SAML authentication.
 
@@ -256,6 +258,8 @@ def do_saml_auth(
         }
 
         allowed_hosts = {vpn_server_host}
+        if vpn_server_ip:
+            allowed_hosts.add(vpn_server_ip)
         if gp_gateway_ip:
             allowed_hosts.add(gp_gateway_ip)
 
@@ -271,9 +275,13 @@ def do_saml_auth(
 
         def _cookie_domain_matches(domain: str) -> bool:
             domain_no_dot = (domain or "").lstrip(".")
-            return bool(domain_no_dot) and (
-                domain_no_dot == vpn_server_host or vpn_server_host.endswith(f".{domain_no_dot}")
-            )
+            if not domain_no_dot:
+                return False
+            if vpn_server_ip and domain_no_dot == vpn_server_ip:
+                return True
+            return domain_no_dot == vpn_server_host or vpn_server_host.endswith(f".{domain_no_dot}")
+
+        wait_url_pattern = re.compile("|".join(re.escape(h) for h in sorted(allowed_hosts) if h))
 
         def handle_request(request):
             if _is_vpn_url(request.url):
@@ -509,7 +517,7 @@ def do_saml_auth(
                             # Get cookies
                             print("  [6/6] Collecting cookies...")
                             try:
-                                page.wait_for_url(f"**{vpn_server_host}**", timeout=15000)
+                                page.wait_for_url(wait_url_pattern, timeout=15000)
                             except PWTimeout:
                                 pass
                         else:
@@ -543,7 +551,7 @@ def do_saml_auth(
                             # Wait for redirect to VPN
                             print("  [6/6] Collecting cookies...")
                             try:
-                                page.wait_for_url(f"**{vpn_server_host}**", timeout=15000)
+                                page.wait_for_url(wait_url_pattern, timeout=15000)
                             except PWTimeout:
                                 pass
                 else:
@@ -704,7 +712,7 @@ def do_saml_auth(
                 # Step 6: Get cookies
                 print("  [6/6] Collecting cookies...")
                 try:
-                    page.wait_for_url(f"**{vpn_server_host}**", timeout=15000)
+                    page.wait_for_url(wait_url_pattern, timeout=15000)
                 except PWTimeout:
                     pass
 
@@ -754,11 +762,8 @@ def do_saml_auth(
 
             # Final validation: ensure we have proper auth cookies for the protocol
             if protocol == "anyconnect":
-                has_valid_cookie = (
-                    vpn_cookies.get('webvpn') or
-                    vpn_cookies.get('SVPNCOOKIE') or
-                    vpn_cookies.get('SAMLResponse')
-                )
+                cookie_names_lower = {k.lower() for k in vpn_cookies.keys()}
+                has_valid_cookie = bool(cookie_names_lower & {"webvpn", "svpncookie", "samlresponse"})
                 if not has_valid_cookie:
                     if debug:
                         print("    [DEBUG] WARNING: No valid AnyConnect auth cookie found!")
@@ -769,7 +774,13 @@ def do_saml_auth(
                             with open('/tmp/nm-vpn-auth-debug.json', 'w') as f:
                                 json.dump({
                                     'error': 'No valid AnyConnect auth cookie',
+                                    'vpn_server': vpn_server_raw,
+                                    'vpn_server_host': vpn_server_host,
+                                    'vpn_server_netloc': vpn_server_netloc,
+                                    'vpn_server_ip': vpn_server_ip,
+                                    'final_url': page.url,
                                     'cookies': list(vpn_cookies.keys()),
+                                    'cookie_domains': sorted({(c.get("domain") or "") for c in cookies}),
                                     'saml_response': saml_result['saml_response'] is not None,
                                     'prelogin_cookie': saml_result['prelogin_cookie'] is not None,
                                 }, f, indent=2)

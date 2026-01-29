@@ -289,11 +289,19 @@ class VPNPluginService(dbus.service.Object):
             # IMPORTANT: Resolve gateway IP NOW, before VPN connects
             # After VPN connects, DNS switches to VPN DNS servers which can't resolve external hostnames
             self.current_gateway_ip = None
+            gateway_lookup = gateway
             try:
-                self.current_gateway_ip = socket.gethostbyname(gateway)
-                log.info(f"Pre-resolved gateway {gateway} -> {self.current_gateway_ip}")
+                from urllib.parse import urlparse
+                parsed = urlparse(gateway if "://" in gateway else f"//{gateway}")
+                if parsed.hostname:
+                    gateway_lookup = parsed.hostname
+            except Exception:
+                gateway_lookup = gateway
+            try:
+                self.current_gateway_ip = socket.gethostbyname(gateway_lookup)
+                log.info(f"Pre-resolved gateway {gateway_lookup} -> {self.current_gateway_ip}")
             except Exception as e:
-                log.warning(f"Failed to pre-resolve gateway {gateway}: {e}")
+                log.warning(f"Failed to pre-resolve gateway {gateway_lookup}: {e}")
                 # If gateway is already an IP address, use it
                 if gateway and gateway[0].isdigit():
                     self.current_gateway_ip = gateway
@@ -367,6 +375,7 @@ class VPNPluginService(dbus.service.Object):
                     try:
                         cookies = do_saml_auth(
                             vpn_server=gateway,
+                            vpn_server_ip=self.current_gateway_ip,
                             username=username,
                             password=password,
                             totp_secret=totp_secret,
