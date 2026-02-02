@@ -283,6 +283,43 @@ def do_saml_auth(
 
         wait_url_pattern = re.compile("|".join(re.escape(h) for h in sorted(allowed_hosts) if h))
 
+        def _wait_for_vpn_callback(timeout_ms: int = 60000) -> None:
+            """Wait for the SAML POST/redirect back to the VPN gateway.
+
+            Some SAML flows POST to the gateway (or load it in an iframe) without the top-level
+            page URL ever matching the VPN host. In those cases, waiting only on page.url is
+            insufficient; instead we wait for a request to the gateway or for captured SAML data.
+            """
+            # Fast path: we already have what we need or we're already on the VPN host.
+            if _is_vpn_url(page.url):
+                return
+            if saml_result.get("saml_response") or saml_result.get("prelogin_cookie") or saml_result.get("portal_userauthcookie"):
+                return
+
+            deadline = time.time() + (timeout_ms / 1000.0)
+            while time.time() < deadline:
+                # Exit early if handlers captured the data while we were waiting.
+                if saml_result.get("saml_response") or saml_result.get("prelogin_cookie") or saml_result.get("portal_userauthcookie"):
+                    return
+                if _is_vpn_url(page.url):
+                    return
+
+                remaining_ms = int((deadline - time.time()) * 1000)
+                step_ms = min(5000, max(250, remaining_ms))
+                try:
+                    req = page.wait_for_request(lambda r: _is_vpn_url(r.url), timeout=step_ms)
+                    # Opportunistically parse SAMLResponse from this request if present.
+                    try:
+                        if req and req.post_data and not saml_result.get("saml_response"):
+                            params = urllib.parse.parse_qs(req.post_data)
+                            if "SAMLResponse" in params:
+                                saml_result["saml_response"] = params["SAMLResponse"][0]
+                    except Exception:
+                        pass
+                    return
+                except PWTimeout:
+                    continue
+
         def handle_request(request):
             if _is_vpn_url(request.url):
                 if debug:
@@ -523,10 +560,7 @@ def do_saml_auth(
 
                             # Get cookies
                             print("  [6/6] Collecting cookies...")
-                            try:
-                                page.wait_for_url(wait_url_pattern, timeout=15000)
-                            except PWTimeout:
-                                pass
+                            _wait_for_vpn_callback(timeout_ms=60000)
                         else:
                             # No password field - MS session remembered, but may need 2FA
                             print("  [3/6] Password skipped (session remembered)")
@@ -558,10 +592,7 @@ def do_saml_auth(
 
                             # Wait for redirect to VPN
                             print("  [6/6] Collecting cookies...")
-                            try:
-                                page.wait_for_url(wait_url_pattern, timeout=15000)
-                            except PWTimeout:
-                                pass
+                            _wait_for_vpn_callback(timeout_ms=60000)
                 else:
                     # Click "Use another account" - try multiple selectors
                     print("  [2/6] Clicking 'Use another account'...")
@@ -722,10 +753,7 @@ def do_saml_auth(
 
                 # Step 6: Get cookies
                 print("  [6/6] Collecting cookies...")
-                try:
-                    page.wait_for_url(wait_url_pattern, timeout=15000)
-                except PWTimeout:
-                    pass
+                _wait_for_vpn_callback(timeout_ms=60000)
 
             time.sleep(0.5)
             cookies = context.cookies()
@@ -779,6 +807,10 @@ def do_saml_auth(
                     if debug:
                         print("    [DEBUG] WARNING: No valid AnyConnect auth cookie found!")
                         print(f"    [DEBUG] Got cookies: {list(vpn_cookies.keys())}")
+                        try:
+                            page.screenshot(path="/tmp/vpn-no-auth-cookie.png")
+                        except Exception:
+                            pass
                         # Write debug info to file for NM plugin debugging
                         try:
                             import json
