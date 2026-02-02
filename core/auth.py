@@ -623,7 +623,9 @@ def do_saml_auth(
                         if debug:
                             page.screenshot(path="/tmp/vpn-step1c-otheraccount.png")
 
-            # Check if login form is present (may be delayed / inside an iframe)
+            # Check if login form is present (may be delayed / inside an iframe).
+            # Some tenants show a "Send notification" MFA prompt immediately with a
+            # "Use your password instead" link (no username input on the page).
             username_field = _wait_for_username_field(page, debug, timeout=30)
             if username_field:
                 # Step 2: Enter username
@@ -754,6 +756,60 @@ def do_saml_auth(
                 # Step 6: Get cookies
                 print("  [6/6] Collecting cookies...")
                 _wait_for_vpn_callback(timeout_ms=60000)
+            else:
+                # No username field: account is already selected or we're on an MFA prompt.
+                # Try switching to password auth (preferred for automation) and continue.
+                if debug:
+                    try:
+                        page.screenshot(path="/tmp/vpn-step2-no-username.png")
+                    except Exception:
+                        pass
+
+                password_field = _wait_for_password_field(page, debug, timeout=15)
+                if password_field:
+                    print("  [2/6] Username skipped (already selected)")
+                    print("  [3/6] Entering password...")
+                    password_field.fill(password)
+                    time.sleep(0.5)
+                    if debug:
+                        try:
+                            page.screenshot(path="/tmp/vpn-step3-password.png")
+                        except Exception:
+                            pass
+                    _click_submit(page)
+                    page.wait_for_load_state("domcontentloaded")
+
+                    # Handle 2FA
+                    print("  [4/6] Handling 2FA...")
+                    time.sleep(3)
+                    if auto_totp and totp_secret:
+                        _handle_2fa(page, totp_secret, debug)
+
+                    # "Stay signed in?" (and similar confirmations)
+                    print("  [5/6] Confirming login...")
+                    try:
+                        btn = _wait_for_visible_in_frames(page, "#idSIButton9", timeout_ms=8000)
+                        if btn:
+                            btn.click(force=True)
+                    except Exception:
+                        pass
+
+                    page.wait_for_load_state("domcontentloaded")
+
+                    # Wait for redirect/callback to VPN
+                    print("  [6/6] Collecting cookies...")
+                    _wait_for_vpn_callback(timeout_ms=60000)
+                else:
+                    # Last resort: trigger the default flow (often "Send notification")
+                    # and wait for the VPN callback. User may need to approve on their phone.
+                    print("  [2/6] No username/password field; continuing with default sign-in (manual approval may be required)...")
+                    try:
+                        _click_submit(page)
+                    except Exception:
+                        pass
+                    page.wait_for_load_state("domcontentloaded")
+                    print("  [6/6] Collecting cookies...")
+                    _wait_for_vpn_callback(timeout_ms=90000)
 
             time.sleep(0.5)
             cookies = context.cookies()
