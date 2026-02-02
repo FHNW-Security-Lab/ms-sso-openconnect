@@ -384,7 +384,11 @@ def do_saml_auth(
 
             # Handle "Pick an account" screen (when multiple accounts are cached)
             pick_account_text = page.locator('text="Pick an account"')
-            if pick_account_text.count() > 0:
+            # The header text is localized; also detect the account-tiles UI by structure.
+            has_account_tiles = page.locator(
+                'div[data-test-id*="tile"], #otherTile, div[data-test-id="otherTile"]'
+            ).count() > 0
+            if pick_account_text.count() > 0 or has_account_tiles:
                 if debug:
                     print("    [DEBUG] Detected account picker screen")
                     page.screenshot(path="/tmp/vpn-step1b-accountpicker.png")
@@ -584,12 +588,12 @@ def do_saml_auth(
                         if debug:
                             page.screenshot(path="/tmp/vpn-step1c-otheraccount.png")
 
-            # Check if login form is present
-            login_form = page.locator('input[name="loginfmt"]')
-            if login_form.count() > 0:
+            # Check if login form is present (may be delayed / inside an iframe)
+            username_field = _wait_for_username_field(page, debug, timeout=15)
+            if username_field:
                 # Step 2: Enter username
                 print("  [2/6] Entering username...")
-                page.fill('input[name="loginfmt"]', username)
+                username_field.fill(username)
                 time.sleep(0.5)
                 if debug:
                     page.screenshot(path="/tmp/vpn-step2-username.png")
@@ -599,15 +603,17 @@ def do_saml_auth(
                 # Step 3: Enter password
                 print("  [3/6] Entering password...")
                 password_field = _wait_for_password_field(page, debug)
-                if not password_field:
-                    raise Exception("Password field not found")
-
-                password_field.fill(password)
-                time.sleep(0.5)
-                if debug:
-                    page.screenshot(path="/tmp/vpn-step3-password.png")
-                _click_submit(page)
-                page.wait_for_load_state("domcontentloaded")
+                if password_field:
+                    password_field.fill(password)
+                    time.sleep(0.5)
+                    if debug:
+                        page.screenshot(path="/tmp/vpn-step3-password.png")
+                    _click_submit(page)
+                    page.wait_for_load_state("domcontentloaded")
+                else:
+                    print("  [3/6] Password skipped (no password field)")
+                    if debug:
+                        page.screenshot(path="/tmp/vpn-step3-nopassword.png")
 
                 # Step 4: Handle 2FA with error recovery
                 print("  [4/6] Handling 2FA...")
@@ -626,8 +632,8 @@ def do_saml_auth(
 
                     for selector in error_selectors:
                         try:
-                            error_elem = page.query_selector(selector)
-                            if error_elem and error_elem.is_visible():
+                            error_elem = _find_visible_in_frames(page, selector)
+                            if error_elem:
                                 error_text = error_elem.inner_text()[:100] if error_elem else "Unknown error"
                                 print(f"    -> Detected auth error: {error_text}...")
                                 print("    -> Refreshing page to retry...")
@@ -636,7 +642,7 @@ def do_saml_auth(
                                 page.reload(wait_until="domcontentloaded")
                                 time.sleep(2)
                                 return True
-                        except:
+                        except Exception:
                             continue
                     return False
 
@@ -658,11 +664,11 @@ def do_saml_auth(
                     is_number_matching = False
                     for selector in number_match_indicators:
                         try:
-                            elem = page.query_selector(selector)
-                            if elem and elem.is_visible():
+                            elem = _find_visible_in_frames(page, selector)
+                            if elem:
                                 is_number_matching = True
                                 break
-                        except:
+                        except Exception:
                             continue
 
                     if is_number_matching:
@@ -681,14 +687,14 @@ def do_saml_auth(
 
                         for selector in different_option_selectors:
                             try:
-                                link = page.query_selector(selector)
-                                if link and link.is_visible():
+                                link = _find_visible_in_frames(page, selector)
+                                if link:
                                     link.click(force=True)
                                     time.sleep(1)
                                     page.wait_for_load_state("domcontentloaded")
                                     print(f"    -> Clicked: '{selector}'")
                                     return True
-                            except:
+                            except Exception:
                                 continue
                     return False
 
@@ -813,6 +819,22 @@ def do_saml_auth(
             raise
 
 
+def _find_visible_in_frames(page, selector: str):
+    """Find first visible element matching selector in any frame."""
+    try:
+        frames = page.frames
+    except Exception:
+        frames = []
+    for frame in frames:
+        try:
+            elem = frame.query_selector(selector)
+            if elem and elem.is_visible():
+                return elem
+        except Exception:
+            continue
+    return None
+
+
 def _click_submit(page) -> bool:
     """Click submit button or press Enter."""
     selectors = [
@@ -822,14 +844,58 @@ def _click_submit(page) -> bool:
     ]
     for sel in selectors:
         try:
-            btn = page.query_selector(sel)
-            if btn and btn.is_visible():
+            btn = _find_visible_in_frames(page, sel)
+            if btn:
                 btn.click(force=True)
                 return True
         except Exception:
             continue
     page.keyboard.press("Enter")
     return False
+
+
+def _wait_for_username_field(page, debug: bool, timeout: int = 30):
+    """Wait for username/email field to appear (handles iframe-based pages)."""
+    selectors = [
+        'input[name="loginfmt"]',
+        "#i0116",
+        'input[type="email"]',
+        'input[autocomplete="username"]',
+    ]
+
+    def find_field():
+        for s in selectors:
+            try:
+                uf = _find_visible_in_frames(page, s)
+                if uf:
+                    box = uf.bounding_box()
+                    if box and box["width"] > 50:
+                        return uf
+            except Exception:
+                continue
+        return None
+
+    initial_url = page.url
+    field = find_field()
+    waited = 0
+
+    while not field and waited < timeout:
+        time.sleep(0.5)
+        waited += 0.5
+
+        if page.url != initial_url:
+            time.sleep(1)
+            page.wait_for_load_state("domcontentloaded")
+            initial_url = page.url
+
+        field = find_field()
+
+    if debug and not field:
+        try:
+            page.screenshot(path="/tmp/vpn-no-username-field.png")
+        except Exception:
+            pass
+    return field
 
 
 def _wait_for_password_field(page, debug: bool, timeout: int = 30):
@@ -842,8 +908,8 @@ def _wait_for_password_field(page, debug: bool, timeout: int = 30):
     def find_field():
         for s in selectors:
             try:
-                pf = page.query_selector(s)
-                if pf and pf.is_visible():
+                pf = _find_visible_in_frames(page, s)
+                if pf:
                     box = pf.bounding_box()
                     if box and box["width"] > 50:
                         return pf
@@ -869,8 +935,8 @@ def _wait_for_password_field(page, debug: bool, timeout: int = 30):
         if waited % 3 == 0:
             for sel in ["#idA_PWD_SwitchToPassword", 'a:has-text("password instead")']:
                 try:
-                    link = page.query_selector(sel)
-                    if link and link.is_visible():
+                    link = _find_visible_in_frames(page, sel)
+                    if link:
                         link.click()
                         time.sleep(1)
                         field = find_field()
@@ -894,8 +960,8 @@ def _handle_2fa(page, totp_secret: str, debug: bool):
     def find_otp():
         for s in otp_selectors:
             try:
-                inp = page.query_selector(s)
-                if inp and inp.is_visible():
+                inp = _find_visible_in_frames(page, s)
+                if inp:
                     if debug:
                         print(f"    [DEBUG] Found OTP input with selector: {s}")
                     return inp
@@ -910,8 +976,8 @@ def _handle_2fa(page, totp_secret: str, debug: bool):
         time.sleep(0.3)
         for s in ["#idSubmit_SAOTCC_Continue", 'input[type="submit"]']:
             try:
-                btn = page.query_selector(s)
-                if btn and btn.is_visible():
+                btn = _find_visible_in_frames(page, s)
+                if btn:
                     if debug:
                         print(f"    [DEBUG] Clicking submit with selector: {s}")
                     btn.click(force=True)
@@ -940,8 +1006,8 @@ def _handle_2fa(page, totp_secret: str, debug: bool):
     clicked_step1 = False
     for sel in step1_selectors:
         try:
-            link = page.query_selector(sel)
-            if link and link.is_visible():
+            link = _find_visible_in_frames(page, sel)
+            if link:
                 if debug:
                     print(f"    [DEBUG] Clicking 'Sign in another way': {sel}")
                 link.click(force=True)
@@ -975,8 +1041,8 @@ def _handle_2fa(page, totp_secret: str, debug: bool):
     clicked_step2 = False
     for sel in step2_selectors:
         try:
-            opt = page.query_selector(sel)
-            if opt and opt.is_visible():
+            opt = _find_visible_in_frames(page, sel)
+            if opt:
                 if debug:
                     print(f"    [DEBUG] Clicking TOTP option: {sel}")
                 opt.click(force=True)
