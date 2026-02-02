@@ -383,12 +383,14 @@ def do_saml_auth(
                     return session_cookies
 
             # Handle "Pick an account" screen (when multiple accounts are cached)
-            pick_account_text = page.locator('text="Pick an account"')
-            # The header text is localized; also detect the account-tiles UI by structure.
-            has_account_tiles = page.locator(
+            # The header text is localized; prefer structural detection, and search across frames
+            # because some login flows embed the UI in iframes.
+            pick_account_text = _find_visible_in_frames(page, 'text="Pick an account"')
+            has_account_tiles = bool(_find_visible_in_frames(
+                page,
                 'div[data-test-id*="tile"], #otherTile, div[data-test-id="otherTile"]'
-            ).count() > 0
-            if pick_account_text.count() > 0 or has_account_tiles:
+            ))
+            if pick_account_text or has_account_tiles:
                 if debug:
                     print("    [DEBUG] Detected account picker screen")
                     page.screenshot(path="/tmp/vpn-step1b-accountpicker.png")
@@ -409,10 +411,10 @@ def do_saml_auth(
 
                 for sel in account_selectors:
                     try:
-                        account_tile = page.locator(sel)
-                        if account_tile.count() > 0 and account_tile.first.is_visible():
+                        account_tile = _find_visible_in_frames(page, sel)
+                        if account_tile:
                             print(f"  [2/6] Selecting existing account: {username}")
-                            account_tile.first.click()
+                            account_tile.click(force=True)
                             account_found = True
                             if debug:
                                 print(f"    [DEBUG] Clicked account with selector: {sel}")
@@ -511,9 +513,10 @@ def do_saml_auth(
                             # "Stay signed in?"
                             print("  [5/6] Confirming login...")
                             try:
-                                page.wait_for_selector("#idSIButton9", timeout=8000)
-                                page.click("#idSIButton9")
-                            except PWTimeout:
+                                btn = _wait_for_visible_in_frames(page, "#idSIButton9", timeout_ms=8000)
+                                if btn:
+                                    btn.click(force=True)
+                            except Exception:
                                 pass
 
                             page.wait_for_load_state("domcontentloaded")
@@ -545,9 +548,10 @@ def do_saml_auth(
                             # "Stay signed in?"
                             print("  [5/6] Confirming login...")
                             try:
-                                page.wait_for_selector("#idSIButton9", timeout=8000)
-                                page.click("#idSIButton9")
-                            except PWTimeout:
+                                btn = _wait_for_visible_in_frames(page, "#idSIButton9", timeout_ms=8000)
+                                if btn:
+                                    btn.click(force=True)
+                            except Exception:
                                 pass
 
                             page.wait_for_load_state("domcontentloaded")
@@ -570,9 +574,9 @@ def do_saml_auth(
                     clicked = False
                     for sel in other_selectors:
                         try:
-                            elem = page.locator(sel)
-                            if elem.count() > 0 and elem.first.is_visible():
-                                elem.first.click(force=True)
+                            elem = _find_visible_in_frames(page, sel)
+                            if elem:
+                                elem.click(force=True)
                                 clicked = True
                                 if debug:
                                     print(f"    [DEBUG] Clicked: {sel}")
@@ -589,7 +593,7 @@ def do_saml_auth(
                             page.screenshot(path="/tmp/vpn-step1c-otheraccount.png")
 
             # Check if login form is present (may be delayed / inside an iframe)
-            username_field = _wait_for_username_field(page, debug, timeout=15)
+            username_field = _wait_for_username_field(page, debug, timeout=30)
             if username_field:
                 # Step 2: Enter username
                 print("  [2/6] Entering username...")
@@ -708,9 +712,10 @@ def do_saml_auth(
                 # Step 5: "Stay signed in?"
                 print("  [5/6] Confirming login...")
                 try:
-                    page.wait_for_selector("#idSIButton9", timeout=8000)
-                    page.click("#idSIButton9")
-                except PWTimeout:
+                    btn = _wait_for_visible_in_frames(page, "#idSIButton9", timeout_ms=8000)
+                    if btn:
+                        btn.click(force=True)
+                except Exception:
                     pass
 
                 page.wait_for_load_state("domcontentloaded")
@@ -778,6 +783,25 @@ def do_saml_auth(
                         try:
                             import json
                             with open('/tmp/nm-vpn-auth-debug.json', 'w') as f:
+                                try:
+                                    page_title = page.title()
+                                except Exception:
+                                    page_title = None
+                                try:
+                                    page_host = urllib.parse.urlparse(page.url).hostname
+                                except Exception:
+                                    page_host = None
+                                frame_hosts = set()
+                                try:
+                                    for fr in page.frames:
+                                        try:
+                                            h = urllib.parse.urlparse(fr.url).hostname
+                                            if h:
+                                                frame_hosts.add(h)
+                                        except Exception:
+                                            continue
+                                except Exception:
+                                    pass
                                 json.dump({
                                     'error': 'No valid AnyConnect auth cookie',
                                     'vpn_server': vpn_server_raw,
@@ -785,6 +809,9 @@ def do_saml_auth(
                                     'vpn_server_netloc': vpn_server_netloc,
                                     'vpn_server_ip': vpn_server_ip,
                                     'final_url': page.url,
+                                    'final_host': page_host,
+                                    'page_title': page_title,
+                                    'frame_hosts': sorted(frame_hosts),
                                     'cookies': list(vpn_cookies.keys()),
                                     'cookie_domains': sorted({(c.get("domain") or "") for c in cookies}),
                                     'saml_response': saml_result['saml_response'] is not None,
@@ -832,6 +859,17 @@ def _find_visible_in_frames(page, selector: str):
                 return elem
         except Exception:
             continue
+    return None
+
+
+def _wait_for_visible_in_frames(page, selector: str, timeout_ms: int = 8000):
+    """Wait for a visible element matching selector in any frame."""
+    deadline = time.time() + (timeout_ms / 1000.0)
+    while time.time() < deadline:
+        elem = _find_visible_in_frames(page, selector)
+        if elem:
+            return elem
+        time.sleep(0.25)
     return None
 
 
