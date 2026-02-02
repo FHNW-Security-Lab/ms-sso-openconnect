@@ -307,6 +307,10 @@ class VPNPluginService(dbus.service.Object):
                     self.current_gateway_ip = gateway
                     log.info(f"Gateway appears to be an IP address: {gateway}")
 
+            # Emit an initial Config early so NetworkManager doesn't time out while
+            # long-running SAML authentication is in progress (notably for GlobalProtect).
+            GLib.idle_add(self._emit_initial_config)
+
             # Connection name for cookie cache
             connection_name = f"nm-{gateway}"
             log.debug(f"Cookie cache connection name: {connection_name}")
