@@ -365,6 +365,7 @@ class VPNPluginService(dbus.service.Object):
                             if self.cancel_requested:
                                 return
                             GLib.idle_add(self._emit_initial_config)
+                            GLib.idle_add(self._emit_starting_keepalive)
 
                     keepalive_thread = threading.Thread(target=_saml_keepalive, daemon=True)
                     keepalive_thread.start()
@@ -679,6 +680,15 @@ class VPNPluginService(dbus.service.Object):
             import traceback
             traceback.print_exc()
 
+        return False
+
+    def _emit_starting_keepalive(self):
+        """Emit a keepalive STARTING state to reduce NM connect timeouts."""
+        try:
+            # Intentionally emit even if our internal state didn't change.
+            self.StateChanged(NM_VPN_SERVICE_STATE_STARTING)
+        except Exception:
+            pass
         return False
 
     def _emit_connected(self):
