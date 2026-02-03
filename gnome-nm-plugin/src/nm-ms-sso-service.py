@@ -314,6 +314,12 @@ class VPNPluginService(dbus.service.Object):
             # Emit an initial Config early so NetworkManager doesn't time out while
             # long-running SAML authentication is in progress (notably for GlobalProtect).
             GLib.idle_add(self._emit_initial_config)
+            # NetworkManager expects the plugin to reach STARTED in a timely manner or it
+            # may cancel the connection (observed ~60s). GlobalProtect SAML/MFA flows can
+            # easily exceed that, so we optimistically mark STARTED during authentication
+            # and later emit the real tunnel config once OpenConnect is up.
+            if protocol == 'gp':
+                GLib.idle_add(self._emit_started_for_auth)
 
             # Connection name for cookie cache
             connection_name = f"nm-{gateway}"
@@ -365,7 +371,11 @@ class VPNPluginService(dbus.service.Object):
                             if self.cancel_requested:
                                 return
                             GLib.idle_add(self._emit_initial_config)
-                            GLib.idle_add(self._emit_starting_keepalive)
+                            # Keep NetworkManager from thinking the connection stalled.
+                            if protocol == 'gp':
+                                GLib.idle_add(self._emit_started_keepalive)
+                            else:
+                                GLib.idle_add(self._emit_starting_keepalive)
 
                     keepalive_thread = threading.Thread(target=_saml_keepalive, daemon=True)
                     keepalive_thread.start()
@@ -687,6 +697,28 @@ class VPNPluginService(dbus.service.Object):
         try:
             # Intentionally emit even if our internal state didn't change.
             self.StateChanged(NM_VPN_SERVICE_STATE_STARTING)
+        except Exception:
+            pass
+        return False
+
+    def _emit_started_for_auth(self):
+        """Enter STARTED while authentication is still in progress.
+
+        NetworkManager may cancel VPN connections that stay in STARTING too long.
+        This is common for GlobalProtect SAML flows with MFA. We later emit the
+        full Config/Ip4Config once the tunnel device exists.
+        """
+        try:
+            self._set_state(NM_VPN_SERVICE_STATE_STARTED)
+        except Exception:
+            pass
+        return False
+
+    def _emit_started_keepalive(self):
+        """Emit a keepalive STARTED state."""
+        try:
+            # Intentionally emit even if our internal state didn't change.
+            self.StateChanged(NM_VPN_SERVICE_STATE_STARTED)
         except Exception:
             pass
         return False
