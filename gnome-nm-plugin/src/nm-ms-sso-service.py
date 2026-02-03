@@ -142,6 +142,9 @@ class VPNPluginService(dbus.service.Object):
         # Store connection info for config emission
         self.current_gateway = None
         self.current_tun_device = None
+        # Cancel flag (e.g. NM timeout/user disconnect) so we don't continue
+        # long-running auth and connect behind NetworkManager's back.
+        self.cancel_requested = False
 
         # Register on D-Bus
         bus_name = dbus.service.BusName(NM_DBUS_SERVICE, bus=bus)
@@ -263,6 +266,7 @@ class VPNPluginService(dbus.service.Object):
         """Worker thread for VPN connection."""
         try:
             self._reset_inactivity_timeout()
+            self.cancel_requested = False
 
             # Extract connection parameters
             secrets = self._get_connection_secrets(settings)
@@ -319,6 +323,9 @@ class VPNPluginService(dbus.service.Object):
             max_attempts = 2
             for attempt in range(max_attempts):
                 log.info(f"Connection attempt {attempt + 1}/{max_attempts}")
+                if self.cancel_requested:
+                    log.info("Connect cancelled before authentication; aborting")
+                    return
 
                 # Try cached cookies first (only on first attempt, not for GlobalProtect)
                 # GlobalProtect prelogin-cookie has very short TTL, so always re-auth
@@ -348,6 +355,19 @@ class VPNPluginService(dbus.service.Object):
                 # If no cached cookies or this is a retry, authenticate
                 if not cookies:
                     log.info("Performing SAML authentication...")
+
+                    # Keep NetworkManager from timing out while SAML is in progress by
+                    # periodically emitting an initial Config. (GP MFA can take >60s.)
+                    stop_keepalive = threading.Event()
+
+                    def _saml_keepalive():
+                        while not stop_keepalive.wait(15):
+                            if self.cancel_requested:
+                                return
+                            GLib.idle_add(self._emit_initial_config)
+
+                    keepalive_thread = threading.Thread(target=_saml_keepalive, daemon=True)
+                    keepalive_thread.start()
 
                     # Ensure playwright can find the browser
                     # Check multiple possible locations
@@ -401,15 +421,24 @@ class VPNPluginService(dbus.service.Object):
                         import traceback
                         traceback.print_exc()
                         raise Exception(f"SAML authentication error: {auth_err}")
+                    finally:
+                        stop_keepalive.set()
 
                     if not cookies:
                         raise Exception("SAML authentication returned no cookies")
+
+                    if self.cancel_requested:
+                        log.info("Connect cancelled during authentication; aborting")
+                        return
 
                     # Store fresh cookies using NM-specific storage (skip GlobalProtect - short TTL)
                     if protocol != 'gp':
                         store_nm_cookies(connection_name, cookies, usergroup='portal:prelogin-cookie')
 
                 # Try to connect with these cookies
+                if self.cancel_requested:
+                    log.info("Connect cancelled before starting OpenConnect; aborting")
+                    return
                 success, error_msg = self._attempt_vpn_connection(gateway, protocol, cookies, username)
 
                 if success:
@@ -855,6 +884,7 @@ class VPNPluginService(dbus.service.Object):
         """Disconnect VPN."""
         log.info("Disconnect called")
         self._reset_inactivity_timeout()
+        self.cancel_requested = True
 
         self._set_state(NM_VPN_SERVICE_STATE_STOPPING)
 
