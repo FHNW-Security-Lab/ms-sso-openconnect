@@ -431,6 +431,29 @@ def do_saml_auth(
                         continue
             return False
 
+        def _click_known_ids(ids: list[str]) -> bool:
+            for frame in page.frames:
+                for element_id in ids:
+                    try:
+                        loc = frame.locator(f"#{element_id}")
+                        if loc.count() > 0 and loc.first.is_visible():
+                            loc.first.click()
+                            return True
+                    except Exception:
+                        continue
+            return False
+
+        def _page_has_text(texts: list[str]) -> bool:
+            for frame in page.frames:
+                for t in texts:
+                    try:
+                        loc = frame.get_by_text(t, exact=False)
+                        if loc.count() > 0:
+                            return True
+                    except Exception:
+                        continue
+            return False
+
         def _goto_with_retries(url: str, timeout_ms: int = 60000) -> None:
             errors = []
             wait_targets = ["domcontentloaded", "load", "networkidle"]
@@ -520,19 +543,7 @@ def do_saml_auth(
                 progressed = False
 
                 # Step 2: account selection / alternate account
-                if username:
-                    for frame in page.frames:
-                        try:
-                            # Prefer exact account tile (email) over other UI text
-                            loc = frame.get_by_text(username, exact=True)
-                            if loc.count() > 0 and loc.first.is_visible():
-                                loc.first.click()
-                                progressed = True
-                                break
-                        except Exception:
-                            continue
-
-                if not progressed:
+                if _page_has_text(["Pick an account", "issue looking up your account"]):
                     if _click_action([
                         "Use another account",
                         "Sign in with another account",
@@ -540,6 +551,31 @@ def do_saml_auth(
                         "Add another account",
                     ]):
                         progressed = True
+                    elif _click_action(["Next", "Weiter"]):
+                        progressed = True
+                    elif _click_known_ids(["idSIButton9"]):
+                        progressed = True
+                else:
+                    if username:
+                        for frame in page.frames:
+                            try:
+                                # Prefer exact account tile (email) over other UI text
+                                loc = frame.get_by_text(username, exact=True)
+                                if loc.count() > 0 and loc.first.is_visible():
+                                    loc.first.click()
+                                    progressed = True
+                                    break
+                            except Exception:
+                                continue
+
+                    if not progressed:
+                        if _click_action([
+                            "Use another account",
+                            "Sign in with another account",
+                            "Use a different account",
+                            "Add another account",
+                        ]):
+                            progressed = True
 
                 # Step 3: username field (prefer explicit "Use another account" if no field yet)
                 if username and not filled_username:
@@ -555,6 +591,7 @@ def do_saml_auth(
                                 filled_username = True
                                 progressed = True
                                 _click_action(["Next", "Weiter", "Continue", "Suivant", "Avanti"])
+                                _click_known_ids(["idSIButton9"])
                             except Exception:
                                 pass
                     else:
@@ -571,6 +608,7 @@ def do_saml_auth(
                             progressed = True
                             # Include German "Anmelden" label used by Unibas
                             _click_action(["Anmelden", "Sign in", "Connexion", "Accedi", "Continue", "Next"])
+                            _click_known_ids(["idSIButton9"])
                         except Exception:
                             pass
 
@@ -582,14 +620,17 @@ def do_saml_auth(
                             otp_loc.fill(generate_totp(totp_secret))
                             filled_otp = True
                             progressed = True
-                            _click_action(["Verify", "Überprüfen", "Continue", "Next", "Submit"])
-                        except Exception:
-                            pass
+                    _click_action(["Verify", "Überprüfen", "Continue", "Next", "Submit"])
+                    _click_known_ids(["idSubmit_SAOTCC_Continue", "idSIButton9"])
+                except Exception:
+                    pass
 
                 # Fallback clicks for common prompts
                 if _click_action(["Use your password instead", "Use password instead"]):
                     progressed = True
                 if _click_action(["Stay signed in", "Yes", "No", "OK", "Continue", "Next", "Weiter"]):
+                    progressed = True
+                if _click_known_ids(["idSIButton9"]):
                     progressed = True
 
                 if not progressed:
@@ -612,6 +653,10 @@ def do_saml_auth(
                 vpn_cookies["prelogin-cookie"] = gp_prelogin_cookie
             if gp_gateway_ip:
                 vpn_cookies["_gateway_ip"] = gp_gateway_ip
+
+            # Avoid returning only helper metadata without a real auth artifact
+            if set(vpn_cookies.keys()) == {"_gateway_ip"}:
+                vpn_cookies = {}
 
             if debug:
                 debug_out = {
