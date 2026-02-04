@@ -21,6 +21,7 @@ import threading
 import time
 import logging
 import socket
+import ipaddress
 from pathlib import Path
 
 # Set up logging - use syslog for reliability
@@ -143,6 +144,10 @@ class VPNPluginService(dbus.service.Object):
         self.current_gateway = None
         self.current_tun_device = None
         self.current_protocol = None
+        # Track GP connection timing so we can delay initial Config/UI state.
+        self.gp_connect_start_time = None
+        self.auth_in_progress = False
+        self.saml_start_time = None
         # Cancel flag (e.g. NM timeout/user disconnect) so we don't continue
         # long-running auth and connect behind NetworkManager's back.
         self.cancel_requested = False
@@ -313,9 +318,20 @@ class VPNPluginService(dbus.service.Object):
                     self.current_gateway_ip = gateway
                     log.info(f"Gateway appears to be an IP address: {gateway}")
 
+            # Safeguard: remove bogus on-link /32 host route to gateway IP if present.
+            # Some networks inject a host route that forces ARP on LAN and breaks reachability.
+            if self.current_gateway_ip:
+                self._clear_onlink_host_route(self.current_gateway_ip)
+
             # Emit an initial Config early so NetworkManager doesn't time out while
             # long-running SAML authentication is in progress (notably for GlobalProtect).
-            GLib.idle_add(self._emit_initial_config)
+            if protocol == 'gp':
+                # Delay GP's first Config emission as well; keep UI in "connecting".
+                self.gp_connect_start_time = time.monotonic()
+                if os.environ.get("MS_SSO_NM_GP_EARLY_CONFIG", "").lower() in {"1", "true", "yes"}:
+                    GLib.idle_add(self._emit_initial_config)
+            else:
+                GLib.idle_add(self._emit_initial_config)
             # NetworkManager expects the plugin to reach STARTED in a timely manner or it
             # may cancel the connection (observed ~60s). GlobalProtect SAML/MFA flows can
             # easily exceed that. By default we keep STARTING so the UI shows "Connecting"
@@ -376,7 +392,8 @@ class VPNPluginService(dbus.service.Object):
                         while not stop_keepalive.wait(15):
                             if self.cancel_requested:
                                 return
-                            GLib.idle_add(self._emit_initial_config)
+                            if protocol != 'gp' or self._gp_initial_config_allowed():
+                                GLib.idle_add(self._emit_initial_config)
                             # Keep NetworkManager from thinking the connection stalled.
                             if protocol == 'gp' and os.environ.get("MS_SSO_NM_GP_EARLY_STARTED", "").lower() in {"1", "true", "yes"}:
                                 GLib.idle_add(self._emit_started_keepalive)
@@ -661,22 +678,8 @@ class VPNPluginService(dbus.service.Object):
         import struct
 
         try:
-            if self.current_protocol == 'gp':
-                allow_early = os.environ.get("MS_SSO_NM_GP_EARLY_CONFIG", "").lower() in {"1", "true", "yes"}
-                if not allow_early:
-                    delay_env = os.environ.get("MS_SSO_NM_GP_CONFIG_DELAY", "").strip()
-                    try:
-                        delay_seconds = int(delay_env) if delay_env else 55
-                    except Exception:
-                        delay_seconds = 55
-                    if getattr(self, "auth_in_progress", False) and getattr(self, "saml_start_time", None):
-                        elapsed = time.monotonic() - self.saml_start_time
-                        if elapsed < delay_seconds:
-                            log.info(
-                                "Skipping initial Config for GP to keep UI in connecting state "
-                                f"(elapsed {elapsed:.0f}s < {delay_seconds}s)"
-                            )
-                            return False
+            if self.current_protocol == 'gp' and not self._gp_initial_config_allowed():
+                return False
 
             gateway = self.current_gateway or ''
 
@@ -719,6 +722,94 @@ class VPNPluginService(dbus.service.Object):
             traceback.print_exc()
 
         return False
+
+    def _gp_initial_config_allowed(self) -> bool:
+        """Return True if GP initial Config may be emitted (delay elapsed or explicitly allowed)."""
+        allow_early = os.environ.get("MS_SSO_NM_GP_EARLY_CONFIG", "").lower() in {"1", "true", "yes"}
+        if allow_early:
+            return True
+        delay_env = os.environ.get("MS_SSO_NM_GP_CONFIG_DELAY", "").strip()
+        try:
+            delay_seconds = int(delay_env) if delay_env else 55
+        except Exception:
+            delay_seconds = 55
+        start_time = None
+        if getattr(self, "auth_in_progress", False) and getattr(self, "saml_start_time", None):
+            start_time = self.saml_start_time
+        elif getattr(self, "gp_connect_start_time", None):
+            start_time = self.gp_connect_start_time
+        if not start_time:
+            return False
+        elapsed = time.monotonic() - start_time
+        if elapsed < delay_seconds:
+            log.info(
+                "Skipping initial Config for GP to keep UI in connecting state "
+                f"(elapsed {elapsed:.0f}s < {delay_seconds}s)"
+            )
+            return False
+        return True
+
+    def _clear_onlink_host_route(self, gateway_ip: str) -> None:
+        """Remove a bogus on-link /32 host route to the VPN gateway if present."""
+        try:
+            ip_obj = ipaddress.ip_address(gateway_ip)
+            if ip_obj.version != 4:
+                return
+        except Exception:
+            return
+
+        # Don't touch routes if the gateway is within a local interface subnet.
+        try:
+            addr_out = subprocess.run(
+                ["ip", "-4", "addr", "show"],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout
+            for line in addr_out.splitlines():
+                line = line.strip()
+                if not line.startswith("inet "):
+                    continue
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                cidr = parts[1]
+                try:
+                    network = ipaddress.ip_network(cidr, strict=False)
+                    if ip_obj in network:
+                        return
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        try:
+            routes = subprocess.run(
+                ["ip", "route", "show", gateway_ip],
+                capture_output=True,
+                text=True,
+                check=False,
+            ).stdout.splitlines()
+        except Exception:
+            return
+
+        for line in routes:
+            if "scope link" not in line or " via " in line:
+                continue
+            parts = line.split()
+            if "dev" not in parts:
+                continue
+            dev = parts[parts.index("dev") + 1]
+            log.warning(f"Removing on-link host route to {gateway_ip} dev {dev}")
+            try:
+                subprocess.run(
+                    ["ip", "route", "del", f"{gateway_ip}/32", "dev", dev],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+            except Exception as e:
+                log.warning(f"Failed to delete on-link host route: {e}")
 
     def _emit_starting_keepalive(self):
         """Emit a keepalive STARTING state to reduce NM connect timeouts."""
