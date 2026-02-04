@@ -666,9 +666,9 @@ class VPNPluginService(dbus.service.Object):
                 if not allow_early:
                     delay_env = os.environ.get("MS_SSO_NM_GP_CONFIG_DELAY", "").strip()
                     try:
-                        delay_seconds = int(delay_env) if delay_env else 45
+                        delay_seconds = int(delay_env) if delay_env else 55
                     except Exception:
-                        delay_seconds = 45
+                        delay_seconds = 55
                     if getattr(self, "auth_in_progress", False) and getattr(self, "saml_start_time", None):
                         elapsed = time.monotonic() - self.saml_start_time
                         if elapsed < delay_seconds:
