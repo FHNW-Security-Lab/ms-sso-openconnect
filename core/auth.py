@@ -454,6 +454,12 @@ def do_saml_auth(
                         continue
             return False
 
+        def _is_adfs_page() -> bool:
+            url = page.url.lower()
+            if "adfs" in url and "/ls" in url:
+                return True
+            return _page_has_text(["ADFS", "user name", "username", "Sign in", "Anmelden"])
+
         def _goto_with_retries(url: str, timeout_ms: int = 60000) -> None:
             errors = []
             wait_targets = ["domcontentloaded", "load", "networkidle"]
@@ -555,6 +561,18 @@ def do_saml_auth(
                         progressed = True
                     elif _click_known_ids(["idSIButton9"]):
                         progressed = True
+                    elif username:
+                        for frame in page.frames:
+                            try:
+                                loc = frame.get_by_text(username, exact=True)
+                                if loc.count() > 0 and loc.first.is_visible():
+                                    loc.first.click()
+                                    progressed = True
+                                    _click_action(["Next", "Weiter"])
+                                    _click_known_ids(["idSIButton9"])
+                                    break
+                            except Exception:
+                                continue
                 else:
                     if username:
                         for frame in page.frames:
@@ -581,19 +599,22 @@ def do_saml_auth(
                 if username and not filled_username:
                     user_loc = _find_best_input("username")
                     if user_loc:
+                        pass_loc = _find_best_input("password")
+                        pass_present = pass_loc is not None
                         try:
                             current_value = _normalize_text(user_loc.input_value())
                         except Exception:
                             current_value = ""
-                        if username.lower() not in current_value:
-                            try:
+                        try:
+                            if username.lower() not in current_value:
                                 user_loc.fill(username)
-                                filled_username = True
-                                progressed = True
+                            filled_username = True
+                            progressed = True
+                            if not pass_present:
                                 _click_action(["Next", "Weiter", "Continue", "Suivant", "Avanti"])
                                 _click_known_ids(["idSIButton9"])
-                            except Exception:
-                                pass
+                        except Exception:
+                            pass
                     else:
                         if _click_action(["Use another account", "Sign in with another account"]):
                             progressed = True
@@ -608,7 +629,7 @@ def do_saml_auth(
                             progressed = True
                             # Include German "Anmelden" label used by Unibas
                             _click_action(["Anmelden", "Sign in", "Connexion", "Accedi", "Continue", "Next"])
-                            _click_known_ids(["idSIButton9"])
+                            _click_known_ids(["idSIButton9", "submitButton"])
                         except Exception:
                             pass
 
@@ -621,16 +642,24 @@ def do_saml_auth(
                             filled_otp = True
                             progressed = True
                             _click_action(["Verify", "Überprüfen", "Continue", "Next", "Submit"])
-                            _click_known_ids(["idSubmit_SAOTCC_Continue", "idSIButton9"])
+                            _click_known_ids(["idSubmit_SAOTCC_Continue", "idSIButton9", "submitButton"])
                         except Exception:
                             pass
 
                 # Fallback clicks for common prompts
                 if _click_action(["Use your password instead", "Use password instead"]):
                     progressed = True
+                if _click_action([
+                    "Use a different verification option",
+                    "Use a verification code",
+                    "Use another method",
+                    "Use a different method",
+                    "I can't use my Microsoft Authenticator app right now",
+                ]):
+                    progressed = True
                 if _click_action(["Stay signed in", "Yes", "No", "OK", "Continue", "Next", "Weiter"]):
                     progressed = True
-                if _click_known_ids(["idSIButton9"]):
+                if _click_known_ids(["idSIButton9", "submitButton"]):
                     progressed = True
 
                 if not progressed:
