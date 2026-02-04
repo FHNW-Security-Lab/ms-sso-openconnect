@@ -142,6 +142,7 @@ class VPNPluginService(dbus.service.Object):
         # Store connection info for config emission
         self.current_gateway = None
         self.current_tun_device = None
+        self.current_protocol = None
         # Cancel flag (e.g. NM timeout/user disconnect) so we don't continue
         # long-running auth and connect behind NetworkManager's back.
         self.cancel_requested = False
@@ -289,6 +290,7 @@ class VPNPluginService(dbus.service.Object):
 
             # Store gateway for config emission
             self.current_gateway = gateway
+            self.current_protocol = protocol
 
             # IMPORTANT: Resolve gateway IP NOW, before VPN connects
             # After VPN connects, DNS switches to VPN DNS servers which can't resolve external hostnames
@@ -677,9 +679,12 @@ class VPNPluginService(dbus.service.Object):
 
             # Emit Config signal WITHOUT tundev - just gateway info
             # tundev will be set in the full Config after interface is up
+            # During GlobalProtect SAML auth, avoid telling NM we already have IPv4
+            # config; otherwise it may time out waiting for Ip4Config.
+            has_ip4 = self.current_protocol != 'gp'
             config = dbus.Dictionary({
                 'gateway': dbus.UInt32(gateway_uint),
-                'has-ip4': dbus.Boolean(True),
+                'has-ip4': dbus.Boolean(has_ip4),
                 'has-ip6': dbus.Boolean(False),
             }, signature='sv')
             self.Config(config)
