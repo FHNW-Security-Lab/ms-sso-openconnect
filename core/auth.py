@@ -582,6 +582,7 @@ def do_saml_auth(
             filled_username = False
             filled_password = False
             filled_otp = False
+            adfs_submit_attempts = 0
 
             timeout_seconds = int(os.environ.get("MS_SSO_SAML_TIMEOUT", "90"))
             if protocol == "gp":
@@ -706,6 +707,27 @@ def do_saml_auth(
                         except Exception:
                             pass
 
+                # ADFS direct submit fallback (JS-based)
+                if adfs_mode and username and password and not progressed and adfs_submit_attempts < 3:
+                    try:
+                        result = page.evaluate(
+                            """(creds) => {
+                                const user = document.getElementById('userNameInput') || document.querySelector('input[name="UserName"]');
+                                const pass = document.getElementById('passwordInput') || document.querySelector('input[name="Password"]');
+                                if (user) user.value = creds.user;
+                                if (pass) pass.value = creds.pass;
+                                const btn = document.getElementById('submitButton') || document.querySelector('input[type="submit"]');
+                                if (btn) btn.click();
+                                return {hasUser: !!user, hasPass: !!pass, hasBtn: !!btn};
+                            }""",
+                            {"user": username, "pass": password},
+                        )
+                        adfs_submit_attempts += 1
+                        if result.get("hasUser") or result.get("hasPass") or result.get("hasBtn"):
+                            progressed = True
+                    except Exception:
+                        pass
+
                 # Step 5: OTP / MFA
                 if totp_secret and auto_totp and not filled_otp:
                     otp_loc = (
@@ -739,7 +761,13 @@ def do_saml_auth(
                 if _click_known_ids(["idSIButton9", "submitButton"]):
                     progressed = True
 
-                if not progressed:
+                if progressed:
+                    try:
+                        page.wait_for_load_state("domcontentloaded", timeout=5000)
+                    except Exception:
+                        pass
+                    time.sleep(0.3)
+                else:
                     time.sleep(1)
 
             _wait_for_vpn_callback(timeout_seconds * 1000)
