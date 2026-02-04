@@ -620,10 +620,10 @@ def do_saml_auth(
                             otp_loc.fill(generate_totp(totp_secret))
                             filled_otp = True
                             progressed = True
-                    _click_action(["Verify", "Überprüfen", "Continue", "Next", "Submit"])
-                    _click_known_ids(["idSubmit_SAOTCC_Continue", "idSIButton9"])
-                except Exception:
-                    pass
+                            _click_action(["Verify", "Überprüfen", "Continue", "Next", "Submit"])
+                            _click_known_ids(["idSubmit_SAOTCC_Continue", "idSIButton9"])
+                        except Exception:
+                            pass
 
                 # Fallback clicks for common prompts
                 if _click_action(["Use your password instead", "Use password instead"]):
