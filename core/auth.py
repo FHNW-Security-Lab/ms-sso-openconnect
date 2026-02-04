@@ -1,13 +1,9 @@
-"""SAML authentication via headless browser.
+"""SAML authentication via headless Playwright with heuristic form handling."""
 
-Combines:
-- Persistent browser context for SSO session caching (from macos branch)
-- 2FA error recovery with page refresh (from main branch)
-- Number matching prompt handling (from main branch)
-- SSO session detection for early exit (from main branch)
-"""
+from __future__ import annotations
 
 import base64
+import json
 import os
 import re
 import ssl
@@ -24,104 +20,73 @@ from .totp import generate_totp
 
 
 def _detect_desktop_user() -> Optional[str]:
-    """Detect the active desktop user when running as root.
-
-    This is used by the NM plugin which runs as root via D-Bus activation,
-    to find and use the desktop user's browser session for SSO continuity.
-
-    Returns:
-        Username of the active desktop user, or None if not found.
-    """
-    import subprocess
+    """Detect the active desktop user when running as root."""
     import glob
+    import subprocess
 
-    # Method 1: Check /run/user/* directories (most reliable on modern Linux)
-    # These directories are created by logind for each active user session
     for user_dir in glob.glob("/run/user/*"):
         try:
             uid = int(os.path.basename(user_dir))
-            if uid >= 1000:  # Regular user UIDs start at 1000
+            if uid >= 1000:
                 import pwd
-                try:
-                    user = pwd.getpwuid(uid).pw_name
-                    # Verify this user has a browser session directory
-                    session_dir = f"/home/{user}/.cache/ms-sso-openconnect/browser-session"
-                    if os.path.isdir(session_dir):
-                        return user
-                except (KeyError, FileNotFoundError):
-                    continue
-        except (ValueError, OSError):
+                user = pwd.getpwuid(uid).pw_name
+                session_dir = f"/home/{user}/.cache/ms-sso-openconnect/browser-session"
+                if os.path.isdir(session_dir):
+                    return user
+        except Exception:
             continue
 
-    # Method 2: Use loginctl to find graphical session owner
     try:
         result = subprocess.run(
             ["loginctl", "list-sessions", "--no-legend"],
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=5,
         )
         if result.returncode == 0:
-            for line in result.stdout.strip().split('\n'):
+            for line in result.stdout.strip().split("\n"):
                 parts = line.split()
                 if len(parts) >= 3:
                     session_id = parts[0]
                     user = parts[2]
-                    # Check if this is a graphical session
                     type_result = subprocess.run(
                         ["loginctl", "show-session", session_id, "-p", "Type"],
                         capture_output=True,
                         text=True,
-                        timeout=5
+                        timeout=5,
                     )
                     if "x11" in type_result.stdout or "wayland" in type_result.stdout:
                         return user
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+    except Exception:
         pass
 
-    # Method 3: Check who owns the display
     try:
-        result = subprocess.run(
-            ["who"],
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
+        result = subprocess.run(["who"], capture_output=True, text=True, timeout=5)
         if result.returncode == 0:
-            for line in result.stdout.strip().split('\n'):
-                if "(:0)" in line or "(:" in line:  # X11 display
-                    user = line.split()[0]
-                    return user
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            for line in result.stdout.strip().split("\n"):
+                if "(:0)" in line or "(:" in line:
+                    return line.split()[0]
+    except Exception:
         pass
 
     return None
 
 
 def _get_gp_prelogin(server: str, debug: bool = False) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    """Get prelogin-cookie from GlobalProtect prelogin.esp.
-
-    Returns:
-        (prelogin_cookie, saml_request, gateway_ip)
-    """
+    """Get prelogin-cookie and SAML request for GlobalProtect."""
     url = f"https://{server}/global-protect/prelogin.esp?tmp=tmp&clientVer=4100&clientos=Linux"
-
     try:
         ctx = ssl.create_default_context()
         req = urllib.request.Request(url)
         req.add_header("User-Agent", "PAN GlobalProtect")
-
         with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
             if resp.status != 200:
                 return None, None, None
-
             content = resp.read().decode("utf-8")
             root = ET.fromstring(content)
-
             prelogin_cookie = None
             saml_request = None
             gateway_ip = None
-
             for elem in root.iter():
                 if elem.tag == "prelogin-cookie":
                     prelogin_cookie = elem.text
@@ -129,7 +94,6 @@ def _get_gp_prelogin(server: str, debug: bool = False) -> tuple[Optional[str], O
                     saml_request = elem.text
                 elif elem.tag == "server-ip":
                     gateway_ip = elem.text
-
             return prelogin_cookie, saml_request, gateway_ip
     except Exception as e:
         if debug:
@@ -141,31 +105,14 @@ def do_saml_auth(
     vpn_server: str,
     username: str,
     password: str,
-    totp_secret: str,
+    totp_secret: Optional[str] = None,
     protocol: str = "anyconnect",
     auto_totp: bool = True,
     headless: bool = True,
     debug: bool = False,
     vpn_server_ip: Optional[str] = None,
-) -> Optional[dict]:
-    """Complete Microsoft SAML authentication.
-
-    Args:
-        vpn_server: VPN server hostname
-        username: Microsoft email
-        password: Password
-        totp_secret: Base32 TOTP secret (auto-generates codes)
-        protocol: Protocol type ('anyconnect' or 'gp')
-        auto_totp: Whether to auto-fill TOTP codes
-        headless: Run browser in headless mode
-        debug: Enable debug output/screenshots
-
-    Returns:
-        Dict with cookies/tokens or None on failure
-    """
-    # Normalize server so we can:
-    # - build correct URLs even if the gateway contains a port or scheme
-    # - match cookies set for parent domains (e.g. ".example.com") reliably
+):
+    """Complete Microsoft SAML authentication and return cookies."""
     vpn_server_raw = vpn_server
     try:
         parsed_server = urllib.parse.urlparse(vpn_server_raw if "://" in vpn_server_raw else f"//{vpn_server_raw}")
@@ -177,67 +124,55 @@ def do_saml_auth(
 
     vpn_url = f"https://{vpn_server_netloc}"
 
-    # Protocol-specific setup
     gp_prelogin_cookie, gp_saml_request, gp_gateway_ip = None, None, None
     if protocol == "gp":
-        print(f"  [1/6] Getting GlobalProtect prelogin info...")
+        print("  [1/6] Getting GlobalProtect prelogin info...")
         gp_prelogin_cookie, gp_saml_request, gp_gateway_ip = _get_gp_prelogin(vpn_server, debug)
         if debug:
             print(f"    [DEBUG] prelogin-cookie: {gp_prelogin_cookie[:20] if gp_prelogin_cookie else None}...")
             print(f"    [DEBUG] gateway_ip: {gp_gateway_ip}")
     else:
-        print(f"  [1/6] Using AnyConnect SAML URL...")
+        print("  [1/6] Using AnyConnect SAML URL...")
 
-    # Ensure Playwright uses real user's browser cache
     real_user = os.environ.get("SUDO_USER", os.environ.get("USER", "root"))
     home = os.path.expanduser("~")
-
-    # If running as root without SUDO_USER (e.g., NM plugin via D-Bus),
-    # try to find the active desktop user
     if real_user == "root":
         detected_user = _detect_desktop_user()
         if detected_user:
             real_user = detected_user
             if debug:
                 print(f"    [DEBUG] Detected desktop user: {real_user}")
-
     if real_user != "root":
         try:
             import pwd
             home = pwd.getpwnam(real_user).pw_dir
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = f"{home}/.cache/ms-playwright"
-        except (KeyError, ImportError):
+        except Exception:
             pass
     else:
-        # Running as root - check for Playwright in common locations
         for pw_path in ["/var/cache/ms-playwright", "/opt/ms-playwright", "/usr/share/ms-playwright"]:
             if os.path.isdir(pw_path):
                 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = pw_path
                 break
 
     with sync_playwright() as p:
-        # Persistent context for SSO session reuse
-        # Use appropriate cache directory based on permissions
         if real_user != "root":
             cache_dir = os.path.join(home, ".cache", "ms-sso-openconnect", "browser-session")
         else:
-            # Running as root (e.g., NM plugin) - use writable system location
             cache_dir = None
             for base in ["/var/cache", "/tmp"]:
                 test_dir = os.path.join(base, "ms-sso-openconnect", "browser-session")
                 try:
                     os.makedirs(test_dir, exist_ok=True)
-                    # Test if writable
                     test_file = os.path.join(test_dir, ".write-test")
                     with open(test_file, "w") as f:
                         f.write("test")
                     os.remove(test_file)
                     cache_dir = test_dir
                     break
-                except (OSError, IOError):
+                except Exception:
                     continue
             if not cache_dir:
-                # Last resort: use /tmp with a unique name
                 cache_dir = f"/tmp/ms-sso-openconnect-{os.getpid()}/browser-session"
         os.makedirs(cache_dir, exist_ok=True)
 
@@ -245,12 +180,10 @@ def do_saml_auth(
             cache_dir,
             headless=headless,
             args=["--no-sandbox", "--disable-dev-shm-usage"],
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         )
-
         page = context.pages[0] if context.pages else context.new_page()
 
-        # Capture SAML response
         saml_result = {
             "prelogin_cookie": None,
             "saml_username": None,
@@ -259,53 +192,41 @@ def do_saml_auth(
         }
 
         allowed_hosts = {vpn_server_host}
-        if vpn_server_ip:
-            allowed_hosts.add(vpn_server_ip)
         if gp_gateway_ip:
             allowed_hosts.add(gp_gateway_ip)
+        if vpn_server_ip:
+            allowed_hosts.add(vpn_server_ip)
 
         def _is_vpn_url(url: str) -> bool:
             try:
-                host = urllib.parse.urlparse(url).hostname
+                host = urllib.parse.urlparse(url).hostname or ""
             except Exception:
-                host = None
-            if host and host in allowed_hosts:
-                return True
-            # Fallback: substring match for unusual URL formats
-            return any(h and h in url for h in allowed_hosts)
+                host = ""
+            return host in allowed_hosts
 
         def _cookie_domain_matches(domain: str) -> bool:
-            domain_no_dot = (domain or "").lstrip(".")
-            if not domain_no_dot:
-                return False
+            domain_no_dot = domain.lstrip(".")
+            if domain_no_dot == vpn_server_host:
+                return True
+            if vpn_server_host.endswith(f".{domain_no_dot}"):
+                return True
             if vpn_server_ip and domain_no_dot == vpn_server_ip:
                 return True
-            return domain_no_dot == vpn_server_host or vpn_server_host.endswith(f".{domain_no_dot}")
+            return False
 
-        wait_url_pattern = re.compile("|".join(re.escape(h) for h in sorted(allowed_hosts) if h))
         vpn_request_event = threading.Event()
 
         def _wait_for_vpn_callback(timeout_ms: int = 60000) -> None:
-            """Wait for the SAML POST/redirect back to the VPN gateway.
-
-            Some SAML flows POST to the gateway (or load it in an iframe) without the top-level
-            page URL ever matching the VPN host. In those cases, waiting only on page.url is
-            insufficient; instead we wait for a request to the gateway or for captured SAML data.
-            """
-            # Fast path: we already have what we need or we're already on the VPN host.
             if _is_vpn_url(page.url):
                 return
             if saml_result.get("saml_response") or saml_result.get("prelogin_cookie") or saml_result.get("portal_userauthcookie"):
                 return
-
             deadline = time.time() + (timeout_ms / 1000.0)
             while time.time() < deadline:
-                # Exit early if handlers captured the data while we were waiting.
                 if saml_result.get("saml_response") or saml_result.get("prelogin_cookie") or saml_result.get("portal_userauthcookie"):
                     return
                 if _is_vpn_url(page.url):
                     return
-
                 if vpn_request_event.wait(timeout=0.25):
                     return
 
@@ -339,7 +260,6 @@ def do_saml_auth(
                 headers = response.headers
                 if debug:
                     print(f"    [DEBUG] Response from VPN: {response.url[:80]}... status={response.status}")
-                    # Log all relevant headers
                     for h in ["prelogin-cookie", "saml-username", "portal-userauthcookie", "set-cookie", "location"]:
                         if h in headers:
                             val = headers[h][:80] if len(headers[h]) > 80 else headers[h]
@@ -356,8 +276,192 @@ def do_saml_auth(
         page.on("request", handle_request)
         page.on("response", handle_response)
 
+        def _find_visible_in_frames(selectors: list[str]):
+            for frame in page.frames:
+                for sel in selectors:
+                    loc = frame.locator(sel)
+                    try:
+                        if loc.count() > 0 and loc.first.is_visible():
+                            return loc.first
+                    except Exception:
+                        continue
+            return None
+
+        def _normalize_text(value: Optional[str]) -> str:
+            return (value or "").strip().lower()
+
+        def _iter_visible_inputs(frame, limit: int = 60):
+            try:
+                inputs = frame.locator("input")
+                count = min(inputs.count(), limit)
+            except Exception:
+                return
+            for idx in range(count):
+                loc = inputs.nth(idx)
+                try:
+                    if not loc.is_visible():
+                        continue
+                    input_type = _normalize_text(loc.get_attribute("type"))
+                    if input_type in {"hidden", "submit", "button", "checkbox", "radio", "file"}:
+                        continue
+                    yield loc
+                except Exception:
+                    continue
+
+        def _score_input(attrs: dict[str, str], kind: str) -> int:
+            name = _normalize_text(attrs.get("name"))
+            input_id = _normalize_text(attrs.get("id"))
+            placeholder = _normalize_text(attrs.get("placeholder"))
+            aria_label = _normalize_text(attrs.get("aria-label"))
+            autocomplete = _normalize_text(attrs.get("autocomplete"))
+            input_type = _normalize_text(attrs.get("type"))
+            input_mode = _normalize_text(attrs.get("inputmode"))
+            data_test = _normalize_text(attrs.get("data-test") or attrs.get("data-testid"))
+
+            haystack = "|".join([name, input_id, placeholder, aria_label, data_test])
+            score = 0
+
+            if kind == "username":
+                if input_type == "email":
+                    score += 6
+                if autocomplete in {"username", "email"}:
+                    score += 6
+                if input_type in {"text", "email"}:
+                    score += 1
+                for hint in [
+                    "user",
+                    "login",
+                    "email",
+                    "username",
+                    "account",
+                    "loginfmt",
+                    "i0116",
+                    "identifier",
+                    "okta",
+                    "adfs",
+                ]:
+                    if hint in haystack:
+                        score += 3
+            elif kind == "password":
+                if input_type == "password":
+                    score += 8
+                if autocomplete in {"current-password", "password"}:
+                    score += 6
+                for hint in [
+                    "pass",
+                    "password",
+                    "passwd",
+                    "pwd",
+                    "i0118",
+                ]:
+                    if hint in haystack:
+                        score += 3
+            elif kind == "otp":
+                if autocomplete == "one-time-code":
+                    score += 8
+                if input_mode == "numeric":
+                    score += 2
+                if input_type == "tel":
+                    score += 2
+                for hint in [
+                    "otp",
+                    "otc",
+                    "mfa",
+                    "2fa",
+                    "totp",
+                    "authenticator",
+                    "verification",
+                    "code",
+                    "security code",
+                ]:
+                    if hint in haystack:
+                        score += 3
+            return score
+
+        def _find_best_input(kind: str):
+            best_score = 0
+            best_loc = None
+            for frame in page.frames:
+                for loc in _iter_visible_inputs(frame):
+                    try:
+                        attrs = {
+                            "type": loc.get_attribute("type") or "",
+                            "name": loc.get_attribute("name") or "",
+                            "id": loc.get_attribute("id") or "",
+                            "placeholder": loc.get_attribute("placeholder") or "",
+                            "aria-label": loc.get_attribute("aria-label") or "",
+                            "autocomplete": loc.get_attribute("autocomplete") or "",
+                            "inputmode": loc.get_attribute("inputmode") or "",
+                            "data-test": loc.get_attribute("data-test") or "",
+                            "data-testid": loc.get_attribute("data-testid") or "",
+                        }
+                        score = _score_input(attrs, kind)
+                        if score > best_score:
+                            best_score = score
+                            best_loc = loc
+                    except Exception:
+                        continue
+            return best_loc
+
+        def _click_action(labels: list[str]) -> bool:
+            patterns = [re.compile(re.escape(label), re.IGNORECASE) for label in labels]
+            for frame in page.frames:
+                for pattern in patterns:
+                    for role in ["button", "link"]:
+                        try:
+                            loc = frame.get_by_role(role, name=pattern)
+                            if loc.count() > 0 and loc.first.is_visible():
+                                loc.first.click()
+                                return True
+                        except Exception:
+                            continue
+                    try:
+                        loc = frame.locator("input[type='submit']")
+                        if loc.count() > 0:
+                            for idx in range(min(loc.count(), 10)):
+                                candidate = loc.nth(idx)
+                                try:
+                                    value = _normalize_text(candidate.get_attribute("value"))
+                                    if value and pattern.search(value) and candidate.is_visible():
+                                        candidate.click()
+                                        return True
+                                except Exception:
+                                    continue
+                    except Exception:
+                        continue
+            return False
+
+        def _goto_with_retries(url: str, timeout_ms: int = 60000) -> None:
+            errors = []
+            wait_targets = ["domcontentloaded", "load", "networkidle"]
+            for attempt in range(3):
+                for wait_until in wait_targets:
+                    try:
+                        page.goto(url, timeout=timeout_ms, wait_until=wait_until)
+                        return
+                    except Exception as exc:
+                        errors.append(exc)
+                        if "ERR_NETWORK_CHANGED" in str(exc):
+                            if debug:
+                                print("    [DEBUG] Page.goto hit ERR_NETWORK_CHANGED; retrying")
+                            time.sleep(1)
+                            continue
+                time.sleep(1)
+            raise errors[-1] if errors else Exception("Page.goto failed")
+
+        def _click_first_text(texts: list[str]):
+            for frame in page.frames:
+                for t in texts:
+                    loc = frame.get_by_text(t, exact=False)
+                    try:
+                        if loc.count() > 0 and loc.first.is_visible():
+                            loc.first.click()
+                            return True
+                    except Exception:
+                        continue
+            return False
+
         try:
-            # Determine start URL based on protocol
             if protocol == "gp" and gp_saml_request:
                 try:
                     start_url = base64.b64decode(gp_saml_request).decode("utf-8")
@@ -370,824 +474,164 @@ def do_saml_auth(
             else:
                 start_url = vpn_url
 
-            # Step 1: Open portal
-            print(f"  [1/6] Opening SAML portal...")
-            for attempt in range(3):
-                try:
-                    page.goto(start_url, timeout=30000, wait_until="networkidle")
-                    break
-                except Exception as e:
-                    if "ERR_NETWORK_CHANGED" in str(e):
-                        if debug:
-                            print("    [DEBUG] Page.goto hit ERR_NETWORK_CHANGED; retrying")
-                        time.sleep(1)
-                        continue
-                    raise
+            print("  [1/6] Opening SAML portal...")
+            _goto_with_retries(start_url, timeout_ms=60000)
+
             if debug:
                 page.screenshot(path="/tmp/vpn-step1-portal.png")
                 print("    [DEBUG] Screenshot: /tmp/vpn-step1-portal.png")
 
-            # Check if already authenticated (SSO session valid)
             time.sleep(1)
-            current_url = page.url
-            if _is_vpn_url(current_url):
+            if _is_vpn_url(page.url):
                 all_cookies = context.cookies()
                 session_cookies = {}
                 for c in all_cookies:
-                    domain = c.get('domain', '')
-                    name = c['name']
-                    if c.get('value') and _cookie_domain_matches(domain):
-                        session_cookies[name] = c['value']
+                    if c.get("value") and _cookie_domain_matches(c.get("domain", "")):
+                        session_cookies[c["name"]] = c["value"]
 
                 has_session = (
-                    session_cookies.get('webvpn') or
-                    session_cookies.get('SVPNCOOKIE') or
-                    saml_result.get('saml_response') or
-                    saml_result.get('prelogin_cookie')
+                    session_cookies.get("webvpn")
+                    or session_cookies.get("SVPNCOOKIE")
+                    or saml_result.get("saml_response")
+                    or saml_result.get("prelogin_cookie")
                 )
-
                 if has_session:
                     print("  -> Already authenticated (SSO session valid)")
-                    if debug:
-                        print(f"    [DEBUG] Session cookies: {list(session_cookies.keys())}")
+                    if saml_result["saml_response"]:
+                        session_cookies["SAMLResponse"] = saml_result["saml_response"]
+                    if saml_result["prelogin_cookie"]:
+                        session_cookies["prelogin-cookie"] = saml_result["prelogin_cookie"]
+                    if gp_prelogin_cookie and "prelogin-cookie" not in session_cookies:
+                        session_cookies["prelogin-cookie"] = gp_prelogin_cookie
                     context.close()
-                    if saml_result['saml_response']:
-                        session_cookies['SAMLResponse'] = saml_result['saml_response']
-                    if saml_result['prelogin_cookie']:
-                        session_cookies['prelogin-cookie'] = saml_result['prelogin_cookie']
-                    if gp_prelogin_cookie and 'prelogin-cookie' not in session_cookies:
-                        session_cookies['prelogin-cookie'] = gp_prelogin_cookie
                     return session_cookies
 
-            # Handle "Pick an account" screen (when multiple accounts are cached)
-            # The header text is localized; prefer structural detection, and search across frames
-            # because some login flows embed the UI in iframes.
-            pick_account_text = _find_visible_in_frames(page, 'text="Pick an account"')
-            has_account_tiles = bool(_find_visible_in_frames(
-                page,
-                'div[data-test-id*="tile"], #otherTile, div[data-test-id="otherTile"]'
-            ))
-            if pick_account_text or has_account_tiles:
-                if debug:
-                    print("    [DEBUG] Detected account picker screen")
-                    page.screenshot(path="/tmp/vpn-step1b-accountpicker.png")
+            filled_username = False
+            filled_password = False
+            filled_otp = False
 
-                # Check if the desired username is already listed (case-insensitive)
-                username_email = username.lower()
-                account_found = False
+            deadline = time.time() + 90
+            while time.time() < deadline:
+                if saml_result.get("saml_response") or saml_result.get("prelogin_cookie") or saml_result.get("portal_userauthcookie"):
+                    break
+                if _is_vpn_url(page.url):
+                    break
 
-                # Try multiple selectors to find matching account tile
-                # MS login shows email in various elements depending on account state
-                account_selectors = [
-                    f'div[data-test-id*="tile"]:has-text("{username_email}")',
-                    f'small:text-is("{username_email}")',
-                    f'div.table-cell:has-text("{username_email}")',
-                    f'div[role="button"]:has-text("{username_email}")',
-                    f'*[data-test-id]:has-text("{username_email}")',
-                ]
+                progressed = False
 
-                for sel in account_selectors:
-                    try:
-                        account_tile = _find_visible_in_frames(page, sel)
-                        if account_tile:
-                            print(f"  [2/6] Selecting existing account: {username}")
-                            account_tile.click(force=True)
-                            account_found = True
-                            if debug:
-                                print(f"    [DEBUG] Clicked account with selector: {sel}")
-                            break
-                    except Exception as e:
-                        if debug:
-                            print(f"    [DEBUG] Selector {sel} failed: {e}")
-                        continue
+                # Step 2: account selection / alternate account
+                if _click_action([
+                    "Use another account",
+                    "Sign in with another account",
+                    "Use a different account",
+                    "Add another account",
+                ]):
+                    progressed = True
 
-                if account_found:
-                    page.wait_for_load_state("networkidle")
-                    time.sleep(2)
-
-                    # Check if clicking signed-in account completed auth (no password needed)
-                    current_url = page.url
-                    if _is_vpn_url(current_url):
-                        print("  -> Fast reconnect: account session still valid!")
-                        # Wait a bit more for response handlers to capture SAML data
-                        time.sleep(1)
-
-                        all_cookies = context.cookies()
-                        session_cookies = {}
-                        for c in all_cookies:
-                            domain = c.get('domain', '')
-                            name = c['name']
-                            if c.get('value') and _cookie_domain_matches(domain):
-                                session_cookies[name] = c['value']
-
-                        # Add captured SAML data
-                        if saml_result['saml_response']:
-                            session_cookies['SAMLResponse'] = saml_result['saml_response']
-                        if saml_result['prelogin_cookie']:
-                            session_cookies['prelogin-cookie'] = saml_result['prelogin_cookie']
-                        if saml_result['portal_userauthcookie']:
-                            session_cookies['portal-userauthcookie'] = saml_result['portal_userauthcookie']
-                        if saml_result['saml_username']:
-                            session_cookies['saml-username'] = saml_result['saml_username']
-                        if gp_prelogin_cookie and 'prelogin-cookie' not in session_cookies:
-                            session_cookies['prelogin-cookie'] = gp_prelogin_cookie
-
-                        # For GlobalProtect, only return early if we have required cookies
-                        if protocol == "gp":
-                            has_gp_cookie = (
-                                session_cookies.get('prelogin-cookie') or
-                                session_cookies.get('portal-userauthcookie')
-                            )
-                            if has_gp_cookie:
-                                if debug:
-                                    print(f"    [DEBUG] Fast reconnect cookies: {list(session_cookies.keys())}")
-                                context.close()
-                                return session_cookies
-                            else:
-                                if debug:
-                                    print("    [DEBUG] No GP cookie found, continuing auth flow...")
-                        elif protocol == "anyconnect":
-                            # AnyConnect needs webvpn/SVPNCOOKIE or SAMLResponse
-                            has_anyconnect_cookie = (
-                                session_cookies.get('webvpn') or
-                                session_cookies.get('SVPNCOOKIE') or
-                                saml_result.get('saml_response')
-                            )
-                            if has_anyconnect_cookie:
-                                if debug:
-                                    print(f"    [DEBUG] Fast reconnect cookies: {list(session_cookies.keys())}")
-                                context.close()
-                                return session_cookies
-                            else:
-                                if debug:
-                                    print("    [DEBUG] No AnyConnect auth cookie found, continuing auth flow...")
-                        elif session_cookies:
-                            context.close()
-                            return session_cookies
-                    else:
-                        # Still on MS login - might need password after selecting account
-                        if debug:
-                            print(f"    [DEBUG] After account select, URL: {current_url[:60]}...")
-                            page.screenshot(path="/tmp/vpn-step2b-afterselect.png")
-
-                        # Check for password field (account selected but needs re-auth)
-                        password_field = _wait_for_password_field(page, debug, timeout=5)
-                        if password_field:
-                            print("  [3/6] Entering password...")
-                            password_field.fill(password)
-                            time.sleep(0.5)
-                            if debug:
-                                page.screenshot(path="/tmp/vpn-step3-password.png")
-                            _click_submit(page)
-                            page.wait_for_load_state("domcontentloaded")
-
-                            # Handle 2FA
-                            print("  [4/6] Handling 2FA...")
-                            time.sleep(3)
-                            if auto_totp and totp_secret:
-                                _handle_2fa(page, totp_secret, debug)
-
-                            # "Stay signed in?"
-                            print("  [5/6] Confirming login...")
-                            try:
-                                btn = _wait_for_visible_in_frames(page, "#idSIButton9", timeout_ms=8000)
-                                if btn:
-                                    btn.click(force=True)
-                            except Exception:
-                                pass
-
-                            page.wait_for_load_state("domcontentloaded")
-
-                            # Get cookies
-                            print("  [6/6] Collecting cookies...")
-                            _wait_for_vpn_callback(timeout_ms=60000)
-                        else:
-                            # No password field - MS session remembered, but may need 2FA
-                            print("  [3/6] Password skipped (session remembered)")
-                            if debug:
-                                page.screenshot(path="/tmp/vpn-step3-nopwd-mfa.png")
-                                print(f"    [DEBUG] No password field, current URL: {page.url[:60]}...")
-
-                            # Handle 2FA - MS may skip password but still require 2FA
-                            print("  [4/6] Checking for 2FA...")
-                            time.sleep(2)
-                            if debug:
-                                page.screenshot(path="/tmp/vpn-step4-before-2fa.png")
-                            if auto_totp and totp_secret:
-                                _handle_2fa(page, totp_secret, debug)
-                            if debug:
-                                time.sleep(2)
-                                page.screenshot(path="/tmp/vpn-step4-after-2fa.png")
-
-                            # "Stay signed in?"
-                            print("  [5/6] Confirming login...")
-                            try:
-                                btn = _wait_for_visible_in_frames(page, "#idSIButton9", timeout_ms=8000)
-                                if btn:
-                                    btn.click(force=True)
-                            except Exception:
-                                pass
-
-                            page.wait_for_load_state("domcontentloaded")
-
-                            # Wait for redirect to VPN
-                            print("  [6/6] Collecting cookies...")
-                            _wait_for_vpn_callback(timeout_ms=60000)
-                else:
-                    # Click "Use another account" - try multiple selectors
-                    print("  [2/6] Clicking 'Use another account'...")
-                    other_selectors = [
-                        'div[data-test-id="otherTile"]',
-                        '#otherTile',
-                        'div:has-text("Use another account")',
-                        'text="Use another account"',
-                    ]
-                    clicked = False
-                    for sel in other_selectors:
+                if username:
+                    for frame in page.frames:
                         try:
-                            elem = _find_visible_in_frames(page, sel)
-                            if elem:
-                                elem.click(force=True)
-                                clicked = True
-                                if debug:
-                                    print(f"    [DEBUG] Clicked: {sel}")
-                                break
-                        except Exception as e:
-                            if debug:
-                                print(f"    [DEBUG] Failed to click {sel}: {e}")
-                            continue
-
-                    if clicked:
-                        page.wait_for_load_state("domcontentloaded")
-                        time.sleep(2)
-                        if debug:
-                            page.screenshot(path="/tmp/vpn-step1c-otheraccount.png")
-
-            # Check if login form is present (may be delayed / inside an iframe).
-            # Some tenants show a "Send notification" MFA prompt immediately with a
-            # "Use your password instead" link (no username input on the page).
-            username_field = _wait_for_username_field(page, debug, timeout=30)
-            if username_field:
-                # Step 2: Enter username
-                print("  [2/6] Entering username...")
-                username_field.fill(username)
-                time.sleep(0.5)
-                if debug:
-                    page.screenshot(path="/tmp/vpn-step2-username.png")
-                _click_submit(page)
-                page.wait_for_load_state("domcontentloaded")
-
-                # Step 3: Enter password
-                print("  [3/6] Entering password...")
-                password_field = _wait_for_password_field(page, debug)
-                if password_field:
-                    password_field.fill(password)
-                    time.sleep(0.5)
-                    if debug:
-                        page.screenshot(path="/tmp/vpn-step3-password.png")
-                    _click_submit(page)
-                    page.wait_for_load_state("domcontentloaded")
-                else:
-                    print("  [3/6] Password skipped (no password field)")
-                    if debug:
-                        page.screenshot(path="/tmp/vpn-step3-nopassword.png")
-
-                # Step 4: Handle 2FA with error recovery
-                print("  [4/6] Handling 2FA...")
-                time.sleep(3)
-
-                # Check for auth error and refresh if needed
-                def check_and_handle_auth_error():
-                    """Check for authentication error and refresh page if found."""
-                    error_selectors = [
-                        'div:has-text("An error occurred")',
-                        'div:has-text("Authentication attempt failed")',
-                        '*:has-text("Select a different sign in option")',
-                        '#errorText',
-                        '.error-message',
-                    ]
-
-                    for selector in error_selectors:
-                        try:
-                            error_elem = _find_visible_in_frames(page, selector)
-                            if error_elem:
-                                error_text = error_elem.inner_text()[:100] if error_elem else "Unknown error"
-                                print(f"    -> Detected auth error: {error_text}...")
-                                print("    -> Refreshing page to retry...")
-                                if debug:
-                                    page.screenshot(path="/tmp/vpn-step4-auth-error.png")
-                                page.reload(wait_until="domcontentloaded")
-                                time.sleep(2)
-                                return True
-                        except Exception:
-                            continue
-                    return False
-
-                error_recovered = check_and_handle_auth_error()
-                if error_recovered and debug:
-                    page.screenshot(path="/tmp/vpn-step4-after-refresh.png")
-
-                # Handle number matching prompt
-                def handle_number_matching_prompt():
-                    """Handle the number matching prompt by clicking 'Use a different verification option'."""
-                    number_match_indicators = [
-                        '*:has-text("tap the number you see")',
-                        '*:has-text("tap the number")',
-                        '*:has-text("Open your Microsoft Authenticator app")',
-                        'div.display-sign-container',
-                        '#displaySign',
-                    ]
-
-                    is_number_matching = False
-                    for selector in number_match_indicators:
-                        try:
-                            elem = _find_visible_in_frames(page, selector)
-                            if elem:
-                                is_number_matching = True
+                            loc = frame.get_by_text(username, exact=False)
+                            if loc.count() > 0 and loc.first.is_visible():
+                                loc.first.click()
+                                progressed = True
                                 break
                         except Exception:
                             continue
 
-                    if is_number_matching:
-                        print("    -> Detected number matching prompt, looking for alternative option...")
-                        if debug:
-                            page.screenshot(path="/tmp/vpn-step4-number-match.png")
-
-                        different_option_selectors = [
-                            'a:has-text("Use a different verification option")',
-                            'a:has-text("different verification option")',
-                            '#signInAnotherWay',
-                            'a#signInAnotherWay',
-                            'a:has-text("I can\'t use my Microsoft Authenticator app right now")',
-                            'a:has-text("Sign in another way")',
-                        ]
-
-                        for selector in different_option_selectors:
-                            try:
-                                link = _find_visible_in_frames(page, selector)
-                                if link:
-                                    link.click(force=True)
-                                    time.sleep(1)
-                                    page.wait_for_load_state("domcontentloaded")
-                                    print(f"    -> Clicked: '{selector}'")
-                                    return True
-                            except Exception:
-                                continue
-                    return False
-
-                number_prompt_handled = handle_number_matching_prompt()
-                if number_prompt_handled:
-                    time.sleep(1)
-
-                if auto_totp and totp_secret:
-                    _handle_2fa(page, totp_secret, debug)
-
-                # Step 5: "Stay signed in?"
-                print("  [5/6] Confirming login...")
-                try:
-                    btn = _wait_for_visible_in_frames(page, "#idSIButton9", timeout_ms=8000)
-                    if btn:
-                        btn.click(force=True)
-                except Exception:
-                    pass
-
-                page.wait_for_load_state("domcontentloaded")
-
-                # Step 6: Get cookies
-                print("  [6/6] Collecting cookies...")
-                _wait_for_vpn_callback(timeout_ms=60000)
-            else:
-                # No username field: account is already selected or we're on an MFA prompt.
-                # Try switching to password auth (preferred for automation) and continue.
-                if debug:
-                    try:
-                        page.screenshot(path="/tmp/vpn-step2-no-username.png")
-                    except Exception:
-                        pass
-
-                password_field = _wait_for_password_field(page, debug, timeout=15)
-                if password_field:
-                    print("  [2/6] Username skipped (already selected)")
-                    print("  [3/6] Entering password...")
-                    password_field.fill(password)
-                    time.sleep(0.5)
-                    if debug:
+                # Step 3: username field
+                if username and not filled_username:
+                    user_loc = _find_best_input("username")
+                    if user_loc:
                         try:
-                            page.screenshot(path="/tmp/vpn-step3-password.png")
+                            current_value = _normalize_text(user_loc.input_value())
+                        except Exception:
+                            current_value = ""
+                        if username.lower() not in current_value:
+                            try:
+                                user_loc.fill(username)
+                                filled_username = True
+                                progressed = True
+                                _click_action(["Next", "Weiter", "Continue", "Suivant", "Avanti"])
+                            except Exception:
+                                pass
+
+                # Step 4: password field
+                if password and not filled_password:
+                    pass_loc = _find_best_input("password")
+                    if pass_loc:
+                        try:
+                            pass_loc.fill(password)
+                            filled_password = True
+                            progressed = True
+                            _click_action(["Sign in", "Anmelden", "Connexion", "Accedi", "Continue", "Next"])
                         except Exception:
                             pass
-                    _click_submit(page)
-                    page.wait_for_load_state("domcontentloaded")
 
-                    # Handle 2FA
-                    print("  [4/6] Handling 2FA...")
-                    time.sleep(3)
-                    if auto_totp and totp_secret:
-                        _handle_2fa(page, totp_secret, debug)
+                # Step 5: OTP / MFA
+                if totp_secret and auto_totp and not filled_otp:
+                    otp_loc = _find_best_input("otp")
+                    if otp_loc:
+                        try:
+                            otp_loc.fill(generate_totp(totp_secret))
+                            filled_otp = True
+                            progressed = True
+                            _click_action(["Verify", "Überprüfen", "Continue", "Next", "Submit"])
+                        except Exception:
+                            pass
 
-                    # "Stay signed in?" (and similar confirmations)
-                    print("  [5/6] Confirming login...")
-                    try:
-                        btn = _wait_for_visible_in_frames(page, "#idSIButton9", timeout_ms=8000)
-                        if btn:
-                            btn.click(force=True)
-                    except Exception:
-                        pass
+                # Fallback clicks for common prompts
+                if _click_action(["Use your password instead", "Use password instead"]):
+                    progressed = True
+                if _click_action(["Stay signed in", "Yes", "No", "OK", "Continue", "Next"]):
+                    progressed = True
 
-                    page.wait_for_load_state("domcontentloaded")
+                if not progressed:
+                    time.sleep(1)
 
-                    # Wait for redirect/callback to VPN
-                    print("  [6/6] Collecting cookies...")
-                    _wait_for_vpn_callback(timeout_ms=60000)
-                else:
-                    # Last resort: trigger the default flow (often "Send notification")
-                    # and wait for the VPN callback. User may need to approve on their phone.
-                    print("  [2/6] No username/password field; continuing with default sign-in (manual approval may be required)...")
-                    try:
-                        _click_submit(page)
-                    except Exception:
-                        pass
-                    page.wait_for_load_state("domcontentloaded")
-                    print("  [6/6] Collecting cookies...")
-                    _wait_for_vpn_callback(timeout_ms=90000)
+            _wait_for_vpn_callback(90000)
 
-            time.sleep(0.5)
-            cookies = context.cookies()
-
-            if debug:
-                print(f"    [DEBUG] Browser cookies ({len(cookies)} total):")
-                for c in cookies:
-                    if _cookie_domain_matches(c.get("domain", "")):
-                        print(f"      - {c['name']}: {str(c['value'])[:30]}... (domain={c.get('domain')})")
-
-            # Filter VPN cookies
+            # Collect cookies
+            all_cookies = context.cookies()
             vpn_cookies = {}
-            gp_names = ["portal-userauthcookie", "portal-prelogonuserauthcookie", "user", "prelogin-cookie"]
+            for c in all_cookies:
+                if c.get("value") and _cookie_domain_matches(c.get("domain", "")):
+                    vpn_cookies[c["name"]] = c["value"]
 
-            for c in cookies:
-                name, domain = c["name"], c.get("domain", "")
-                if name.lower() in [n.lower() for n in gp_names]:
-                    vpn_cookies[name] = c["value"]
-                elif _cookie_domain_matches(domain):
-                    vpn_cookies[name] = c["value"]
-
-            # Add captured SAML data
             if saml_result["saml_response"]:
                 vpn_cookies["SAMLResponse"] = saml_result["saml_response"]
             if saml_result["prelogin_cookie"]:
                 vpn_cookies["prelogin-cookie"] = saml_result["prelogin_cookie"]
-            if saml_result["portal_userauthcookie"]:
-                vpn_cookies["portal-userauthcookie"] = saml_result["portal_userauthcookie"]
-            if saml_result["saml_username"]:
-                vpn_cookies["saml-username"] = saml_result["saml_username"]
-
-            # Add prelogin from prelogin.esp
             if gp_prelogin_cookie and "prelogin-cookie" not in vpn_cookies:
                 vpn_cookies["prelogin-cookie"] = gp_prelogin_cookie
             if gp_gateway_ip:
                 vpn_cookies["_gateway_ip"] = gp_gateway_ip
 
             if debug:
-                print(f"    [DEBUG] Final VPN cookies to return:")
-                for k, v in vpn_cookies.items():
-                    print(f"      - {k}: {str(v)[:40]}...")
-                print(f"    [DEBUG] saml_result: prelogin={saml_result['prelogin_cookie'] is not None}, "
-                      f"saml_response={saml_result['saml_response'] is not None}, "
-                      f"portal_userauthcookie={saml_result['portal_userauthcookie'] is not None}")
-
-            # Final validation: ensure we have proper auth cookies for the protocol
-            if protocol == "anyconnect":
-                cookie_names_lower = {k.lower() for k in vpn_cookies.keys()}
-                has_valid_cookie = bool(cookie_names_lower & {"webvpn", "svpncookie", "samlresponse"})
-                if not has_valid_cookie:
-                    if debug:
-                        print("    [DEBUG] WARNING: No valid AnyConnect auth cookie found!")
-                        print(f"    [DEBUG] Got cookies: {list(vpn_cookies.keys())}")
-                        try:
-                            page.screenshot(path="/tmp/vpn-no-auth-cookie.png")
-                        except Exception:
-                            pass
-                        # Write debug info to file for NM plugin debugging
-                        try:
-                            import json
-                            with open('/tmp/nm-vpn-auth-debug.json', 'w') as f:
-                                try:
-                                    page_title = page.title()
-                                except Exception:
-                                    page_title = None
-                                try:
-                                    page_host = urllib.parse.urlparse(page.url).hostname
-                                except Exception:
-                                    page_host = None
-                                frame_hosts = set()
-                                try:
-                                    for fr in page.frames:
-                                        try:
-                                            h = urllib.parse.urlparse(fr.url).hostname
-                                            if h:
-                                                frame_hosts.add(h)
-                                        except Exception:
-                                            continue
-                                except Exception:
-                                    pass
-                                json.dump({
-                                    'error': 'No valid AnyConnect auth cookie',
-                                    'vpn_server': vpn_server_raw,
-                                    'vpn_server_host': vpn_server_host,
-                                    'vpn_server_netloc': vpn_server_netloc,
-                                    'vpn_server_ip': vpn_server_ip,
-                                    'final_url': page.url,
-                                    'final_host': page_host,
-                                    'page_title': page_title,
-                                    'frame_hosts': sorted(frame_hosts),
-                                    'cookies': list(vpn_cookies.keys()),
-                                    'cookie_domains': sorted({(c.get("domain") or "") for c in cookies}),
-                                    'saml_response': saml_result['saml_response'] is not None,
-                                    'prelogin_cookie': saml_result['prelogin_cookie'] is not None,
-                                }, f, indent=2)
-                        except Exception:
-                            pass
-                    # Return None to indicate auth failure rather than returning bad cookies
-                    context.close()
-                    return None
-            elif protocol == "gp":
-                has_valid_cookie = (
-                    vpn_cookies.get('prelogin-cookie') or
-                    vpn_cookies.get('portal-userauthcookie')
-                )
-                if not has_valid_cookie:
-                    if debug:
-                        print("    [DEBUG] WARNING: No valid GlobalProtect auth cookie found!")
-                    context.close()
-                    return None
+                debug_out = {
+                    "vpn_server": vpn_server,
+                    "vpn_server_host": vpn_server_host,
+                    "vpn_server_netloc": vpn_server_netloc,
+                    "vpn_server_ip": vpn_server_ip,
+                    "final_url": page.url,
+                    "cookies": list(vpn_cookies.keys()),
+                    "cookie_domains": sorted({c.get("domain", "") for c in all_cookies}),
+                    "saml_response": bool(saml_result["saml_response"]),
+                    "prelogin_cookie": bool(vpn_cookies.get("prelogin-cookie")),
+                }
+                try:
+                    with open("/tmp/nm-vpn-auth-debug.json", "w") as f:
+                        json.dump(debug_out, f, indent=2)
+                except Exception:
+                    pass
 
             context.close()
-            return vpn_cookies if vpn_cookies else None
-
+            return vpn_cookies
         except Exception as e:
             if debug:
                 try:
-                    page.screenshot(path="/tmp/vpn-error.png")
+                    page.screenshot(path="/tmp/vpn-auth-error.png")
                 except Exception:
                     pass
             context.close()
-            raise
-
-
-def _find_visible_in_frames(page, selector: str):
-    """Find first visible element matching selector in any frame."""
-    try:
-        frames = page.frames
-    except Exception:
-        frames = []
-    for frame in frames:
-        try:
-            elem = frame.query_selector(selector)
-            if elem and elem.is_visible():
-                return elem
-        except Exception:
-            continue
-    return None
-
-
-def _wait_for_visible_in_frames(page, selector: str, timeout_ms: int = 8000):
-    """Wait for a visible element matching selector in any frame."""
-    deadline = time.time() + (timeout_ms / 1000.0)
-    while time.time() < deadline:
-        elem = _find_visible_in_frames(page, selector)
-        if elem:
-            return elem
-        time.sleep(0.25)
-    return None
-
-
-def _click_submit(page) -> bool:
-    """Click submit button or press Enter."""
-    selectors = [
-        "#idSIButton9", "#submitButton", "span#submitButton",
-        'input[type="submit"]', 'button[type="submit"]',
-        'span:has-text("Sign in")', 'button:has-text("Sign in")',
-    ]
-    for sel in selectors:
-        try:
-            btn = _find_visible_in_frames(page, sel)
-            if btn:
-                btn.click(force=True)
-                return True
-        except Exception:
-            continue
-    page.keyboard.press("Enter")
-    return False
-
-
-def _wait_for_username_field(page, debug: bool, timeout: int = 30):
-    """Wait for username/email field to appear (handles iframe-based pages)."""
-    selectors = [
-        'input[name="loginfmt"]',
-        "#i0116",
-        'input[type="email"]',
-        'input[autocomplete="username"]',
-    ]
-
-    def find_field():
-        for s in selectors:
-            try:
-                uf = _find_visible_in_frames(page, s)
-                if uf:
-                    box = uf.bounding_box()
-                    if box and box["width"] > 50:
-                        return uf
-            except Exception:
-                continue
-        return None
-
-    initial_url = page.url
-    field = find_field()
-    waited = 0
-
-    while not field and waited < timeout:
-        time.sleep(0.5)
-        waited += 0.5
-
-        if page.url != initial_url:
-            time.sleep(1)
-            page.wait_for_load_state("domcontentloaded")
-            initial_url = page.url
-
-        field = find_field()
-
-    if debug and not field:
-        try:
-            page.screenshot(path="/tmp/vpn-no-username-field.png")
-        except Exception:
-            pass
-    return field
-
-
-def _wait_for_password_field(page, debug: bool, timeout: int = 30):
-    """Wait for password field to appear (handles federated login redirect)."""
-    selectors = [
-        'input[name="passwd"]', 'input[name="password"]', 'input[type="password"]',
-        "#passwordInput", "#password", "#i0118",
-    ]
-
-    def find_field():
-        for s in selectors:
-            try:
-                pf = _find_visible_in_frames(page, s)
-                if pf:
-                    box = pf.bounding_box()
-                    if box and box["width"] > 50:
-                        return pf
-            except Exception:
-                continue
-        return None
-
-    initial_url = page.url
-    field = find_field()
-    waited = 0
-
-    while not field and waited < timeout:
-        time.sleep(0.5)
-        waited += 0.5
-
-        if page.url != initial_url:
-            time.sleep(1)
-            page.wait_for_load_state("domcontentloaded")
-
-        field = find_field()
-
-        # Try clicking "Use password" if visible
-        if waited % 3 == 0:
-            for sel in ["#idA_PWD_SwitchToPassword", 'a:has-text("password instead")']:
-                try:
-                    link = _find_visible_in_frames(page, sel)
-                    if link:
-                        link.click()
-                        time.sleep(1)
-                        field = find_field()
-                        break
-                except Exception:
-                    continue
-
-    return field
-
-
-def _handle_2fa(page, totp_secret: str, debug: bool):
-    """Handle 2FA code entry."""
-    if debug:
-        print("    [DEBUG] _handle_2fa called")
-
-    otp_selectors = [
-        "#idTxtBx_SAOTCC_OTC", 'input[name="otc"]',
-        'input[placeholder*="code"]', 'input[aria-label*="code"]',
-    ]
-
-    def find_otp():
-        for s in otp_selectors:
-            try:
-                inp = _find_visible_in_frames(page, s)
-                if inp:
-                    if debug:
-                        print(f"    [DEBUG] Found OTP input with selector: {s}")
-                    return inp
-            except Exception:
-                continue
-        return None
-
-    def enter_code(inp):
-        code = generate_totp(totp_secret)
-        print(f"    -> Entering TOTP code: {code}")
-        inp.fill(code)
-        time.sleep(0.3)
-        for s in ["#idSubmit_SAOTCC_Continue", 'input[type="submit"]']:
-            try:
-                btn = _find_visible_in_frames(page, s)
-                if btn:
-                    if debug:
-                        print(f"    [DEBUG] Clicking submit with selector: {s}")
-                    btn.click(force=True)
-                    return
-            except Exception:
-                continue
-        if debug:
-            print("    [DEBUG] No submit button found, pressing Enter")
-        page.keyboard.press("Enter")
-
-    # Try direct OTP input
-    otp = find_otp()
-    if otp:
-        enter_code(otp)
-        return
-
-    if debug:
-        print("    [DEBUG] No direct OTP input found, trying alternative flows...")
-
-    # Try "Sign in another way" flow
-    step1_selectors = [
-        "#signInAnotherWay", 'a:has-text("I can\'t use my Microsoft Authenticator")',
-        'a:has-text("Sign in another way")', "#idA_SAASTO_LookupLink",
-    ]
-
-    clicked_step1 = False
-    for sel in step1_selectors:
-        try:
-            link = _find_visible_in_frames(page, sel)
-            if link:
-                if debug:
-                    print(f"    [DEBUG] Clicking 'Sign in another way': {sel}")
-                link.click(force=True)
-                clicked_step1 = True
-                time.sleep(0.8)
-                break
-        except Exception:
-            continue
-
-    if debug and not clicked_step1:
-        print("    [DEBUG] No 'Sign in another way' link found")
-
-    otp = find_otp()
-    if otp:
-        enter_code(otp)
-        return
-
-    # Try selecting TOTP option - expanded selectors
-    step2_selectors = [
-        'div[data-value="PhoneAppOTP"]',
-        'div:has-text("verification code")',
-        'div:has-text("Use a verification code")',
-        '#idDiv_SAOTCC_Description',
-        'div[role="button"]:has-text("verification")',
-        'button:has-text("verification")',
-    ]
-
-    if debug:
-        print("    [DEBUG] Trying to click TOTP option...")
-
-    clicked_step2 = False
-    for sel in step2_selectors:
-        try:
-            opt = _find_visible_in_frames(page, sel)
-            if opt:
-                if debug:
-                    print(f"    [DEBUG] Clicking TOTP option: {sel}")
-                opt.click(force=True)
-                clicked_step2 = True
-                time.sleep(0.8)
-                break
-        except Exception as e:
-            if debug:
-                print(f"    [DEBUG] Selector {sel} failed: {e}")
-            continue
-
-    if debug and not clicked_step2:
-        print("    [DEBUG] WARNING: Could not click any TOTP option!")
-        page.screenshot(path="/tmp/vpn-2fa-noclick.png")
-
-    otp = find_otp()
-    if otp:
-        enter_code(otp)
-    else:
-        if debug:
-            print("    [DEBUG] WARNING: Still no OTP input found after clicking options!")
-            page.screenshot(path="/tmp/vpn-2fa-nootp.png")
+            raise e

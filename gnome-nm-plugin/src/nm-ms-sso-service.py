@@ -318,10 +318,12 @@ class VPNPluginService(dbus.service.Object):
             GLib.idle_add(self._emit_initial_config)
             # NetworkManager expects the plugin to reach STARTED in a timely manner or it
             # may cancel the connection (observed ~60s). GlobalProtect SAML/MFA flows can
-            # easily exceed that, so we optimistically mark STARTED during authentication
-            # and later emit the real tunnel config once OpenConnect is up.
+            # easily exceed that. By default we keep STARTING so the UI shows "Connecting"
+            # until the tunnel is actually up. Set MS_SSO_NM_GP_EARLY_STARTED=1 to
+            # preserve the legacy behavior (optimistically marking STARTED during auth).
             if protocol == 'gp':
-                GLib.idle_add(self._emit_started_for_auth)
+                if os.environ.get("MS_SSO_NM_GP_EARLY_STARTED", "").lower() in {"1", "true", "yes"}:
+                    GLib.idle_add(self._emit_started_for_auth)
 
             # Connection name for cookie cache
             connection_name = f"nm-{gateway}"
@@ -374,7 +376,7 @@ class VPNPluginService(dbus.service.Object):
                                 return
                             GLib.idle_add(self._emit_initial_config)
                             # Keep NetworkManager from thinking the connection stalled.
-                            if protocol == 'gp':
+                            if protocol == 'gp' and os.environ.get("MS_SSO_NM_GP_EARLY_STARTED", "").lower() in {"1", "true", "yes"}:
                                 GLib.idle_add(self._emit_started_keepalive)
                             else:
                                 GLib.idle_add(self._emit_starting_keepalive)
