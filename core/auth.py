@@ -287,6 +287,29 @@ def do_saml_auth(
                         continue
             return None
 
+        def _find_input_by_ids(ids: list[str]):
+            for frame in page.frames:
+                for element_id in ids:
+                    try:
+                        loc = frame.locator(f"#{element_id}")
+                        if loc.count() > 0 and loc.first.is_visible():
+                            return loc.first
+                    except Exception:
+                        continue
+            return None
+
+        def _find_input_by_labels(labels: list[str]):
+            patterns = [re.compile(re.escape(label), re.IGNORECASE) for label in labels]
+            for frame in page.frames:
+                for pattern in patterns:
+                    try:
+                        loc = frame.get_by_label(pattern)
+                        if loc.count() > 0 and loc.first.is_visible():
+                            return loc.first
+                    except Exception:
+                        continue
+            return None
+
         def _normalize_text(value: Optional[str]) -> str:
             return (value or "").strip().lower()
 
@@ -403,6 +426,12 @@ def do_saml_auth(
                         continue
             return best_loc
 
+        def _input_value_empty(loc) -> bool:
+            try:
+                return not _normalize_text(loc.input_value())
+            except Exception:
+                return False
+
         def _click_action(labels: list[str]) -> bool:
             patterns = [re.compile(re.escape(label), re.IGNORECASE) for label in labels]
             for frame in page.frames:
@@ -429,6 +458,13 @@ def do_saml_auth(
                                     continue
                     except Exception:
                         continue
+                    try:
+                        loc = frame.get_by_text(pattern, exact=False)
+                        if loc.count() > 0 and loc.first.is_visible():
+                            loc.first.click()
+                            return True
+                    except Exception:
+                        continue
             return False
 
         def _click_known_ids(ids: list[str]) -> bool:
@@ -452,6 +488,14 @@ def do_saml_auth(
                             return True
                     except Exception:
                         continue
+            try:
+                body_text = page.evaluate("() => document.body && document.body.innerText ? document.body.innerText : ''")
+                body_lower = (body_text or "").lower()
+                for t in texts:
+                    if t.lower() in body_lower:
+                        return True
+            except Exception:
+                pass
             return False
 
         def _is_adfs_page() -> bool:
@@ -539,7 +583,10 @@ def do_saml_auth(
             filled_password = False
             filled_otp = False
 
-            deadline = time.time() + 90
+            timeout_seconds = int(os.environ.get("MS_SSO_SAML_TIMEOUT", "90"))
+            if protocol == "gp":
+                timeout_seconds = max(timeout_seconds, 180)
+            deadline = time.time() + timeout_seconds
             while time.time() < deadline:
                 if saml_result.get("saml_response") or saml_result.get("prelogin_cookie") or saml_result.get("portal_userauthcookie"):
                     break
@@ -547,6 +594,7 @@ def do_saml_auth(
                     break
 
                 progressed = False
+                adfs_mode = _is_adfs_page()
 
                 # Step 2: account selection / alternate account
                 if _page_has_text(["Pick an account", "issue looking up your account"]):
@@ -555,6 +603,8 @@ def do_saml_auth(
                         "Sign in with another account",
                         "Use a different account",
                         "Add another account",
+                        "Mit einem anderen Konto anmelden",
+                        "Anderes Konto verwenden",
                     ]):
                         progressed = True
                     elif _click_action(["Next", "Weiter"]):
@@ -562,17 +612,25 @@ def do_saml_auth(
                     elif _click_known_ids(["idSIButton9"]):
                         progressed = True
                     elif username:
+                        candidates = [username]
+                        if "@" in username:
+                            local_part, domain_part = username.split("@", 1)
+                            candidates.append(local_part)
+                            candidates.append(f"@{domain_part}")
                         for frame in page.frames:
-                            try:
-                                loc = frame.get_by_text(username, exact=True)
-                                if loc.count() > 0 and loc.first.is_visible():
-                                    loc.first.click()
-                                    progressed = True
-                                    _click_action(["Next", "Weiter"])
-                                    _click_known_ids(["idSIButton9"])
-                                    break
-                            except Exception:
-                                continue
+                            for candidate in candidates:
+                                try:
+                                    loc = frame.get_by_text(candidate, exact=False)
+                                    if loc.count() > 0 and loc.first.is_visible():
+                                        loc.first.click()
+                                        progressed = True
+                                        _click_action(["Next", "Weiter"])
+                                        _click_known_ids(["idSIButton9"])
+                                        break
+                                except Exception:
+                                    continue
+                            if progressed:
+                                break
                 else:
                     if username:
                         for frame in page.frames:
@@ -592,12 +650,18 @@ def do_saml_auth(
                             "Sign in with another account",
                             "Use a different account",
                             "Add another account",
+                            "Mit einem anderen Konto anmelden",
+                            "Anderes Konto verwenden",
                         ]):
                             progressed = True
 
                 # Step 3: username field (prefer explicit "Use another account" if no field yet)
-                if username and not filled_username:
-                    user_loc = _find_best_input("username")
+                if username and (adfs_mode or not filled_username):
+                    user_loc = (
+                        _find_input_by_ids(["userNameInput", "username", "loginfmt", "i0116", "identifierId", "email"])
+                        or _find_input_by_labels(["Benutzername", "Benutzer-ID", "Benutzer ID", "User name", "Username", "E-Mail", "Email"])
+                        or _find_best_input("username")
+                    )
                     if user_loc:
                         pass_loc = _find_best_input("password")
                         pass_present = pass_loc is not None
@@ -606,7 +670,7 @@ def do_saml_auth(
                         except Exception:
                             current_value = ""
                         try:
-                            if username.lower() not in current_value:
+                            if adfs_mode or username.lower() not in current_value:
                                 user_loc.fill(username)
                             filled_username = True
                             progressed = True
@@ -620,22 +684,35 @@ def do_saml_auth(
                             progressed = True
 
                 # Step 4: password field
-                if password and not filled_password:
-                    pass_loc = _find_best_input("password")
+                if password and (adfs_mode or not filled_password):
+                    pass_loc = (
+                        _find_input_by_ids(["passwordInput", "password", "i0118", "passwd", "Passwd"])
+                        or _find_input_by_labels(["Kennwort", "Passwort", "Password", "Mot de passe"])
+                        or _find_best_input("password")
+                    )
                     if pass_loc:
                         try:
-                            pass_loc.fill(password)
+                            if adfs_mode or _input_value_empty(pass_loc):
+                                pass_loc.fill(password)
                             filled_password = True
                             progressed = True
                             # Include German "Anmelden" label used by Unibas
                             _click_action(["Anmelden", "Sign in", "Connexion", "Accedi", "Continue", "Next"])
                             _click_known_ids(["idSIButton9", "submitButton"])
+                            try:
+                                pass_loc.press("Enter")
+                            except Exception:
+                                pass
                         except Exception:
                             pass
 
                 # Step 5: OTP / MFA
                 if totp_secret and auto_totp and not filled_otp:
-                    otp_loc = _find_best_input("otp")
+                    otp_loc = (
+                        _find_input_by_ids(["idTxtBx_SAOTCC_OTC", "idTxtBx_SAOTCC_OTP", "otp", "otc", "code"])
+                        or _find_input_by_labels(["Verification code", "Security code", "Code", "OTP", "Einmalcode"])
+                        or _find_best_input("otp")
+                    )
                     if otp_loc:
                         try:
                             otp_loc.fill(generate_totp(totp_secret))
@@ -665,7 +742,7 @@ def do_saml_auth(
                 if not progressed:
                     time.sleep(1)
 
-            _wait_for_vpn_callback(90000)
+            _wait_for_vpn_callback(timeout_seconds * 1000)
 
             # Collect cookies
             all_cookies = context.cookies()
