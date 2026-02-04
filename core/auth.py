@@ -520,18 +520,11 @@ def do_saml_auth(
                 progressed = False
 
                 # Step 2: account selection / alternate account
-                if _click_action([
-                    "Use another account",
-                    "Sign in with another account",
-                    "Use a different account",
-                    "Add another account",
-                ]):
-                    progressed = True
-
                 if username:
                     for frame in page.frames:
                         try:
-                            loc = frame.get_by_text(username, exact=False)
+                            # Prefer exact account tile (email) over other UI text
+                            loc = frame.get_by_text(username, exact=True)
                             if loc.count() > 0 and loc.first.is_visible():
                                 loc.first.click()
                                 progressed = True
@@ -539,7 +532,16 @@ def do_saml_auth(
                         except Exception:
                             continue
 
-                # Step 3: username field
+                if not progressed:
+                    if _click_action([
+                        "Use another account",
+                        "Sign in with another account",
+                        "Use a different account",
+                        "Add another account",
+                    ]):
+                        progressed = True
+
+                # Step 3: username field (prefer explicit "Use another account" if no field yet)
                 if username and not filled_username:
                     user_loc = _find_best_input("username")
                     if user_loc:
@@ -555,6 +557,9 @@ def do_saml_auth(
                                 _click_action(["Next", "Weiter", "Continue", "Suivant", "Avanti"])
                             except Exception:
                                 pass
+                    else:
+                        if _click_action(["Use another account", "Sign in with another account"]):
+                            progressed = True
 
                 # Step 4: password field
                 if password and not filled_password:
@@ -564,7 +569,8 @@ def do_saml_auth(
                             pass_loc.fill(password)
                             filled_password = True
                             progressed = True
-                            _click_action(["Sign in", "Anmelden", "Connexion", "Accedi", "Continue", "Next"])
+                            # Include German "Anmelden" label used by Unibas
+                            _click_action(["Anmelden", "Sign in", "Connexion", "Accedi", "Continue", "Next"])
                         except Exception:
                             pass
 
@@ -583,7 +589,7 @@ def do_saml_auth(
                 # Fallback clicks for common prompts
                 if _click_action(["Use your password instead", "Use password instead"]):
                     progressed = True
-                if _click_action(["Stay signed in", "Yes", "No", "OK", "Continue", "Next"]):
+                if _click_action(["Stay signed in", "Yes", "No", "OK", "Continue", "Next", "Weiter"]):
                     progressed = True
 
                 if not progressed:
