@@ -657,6 +657,12 @@ class VPNPluginService(dbus.service.Object):
         import struct
 
         try:
+            if self.current_protocol == 'gp':
+                allow_early = os.environ.get("MS_SSO_NM_GP_EARLY_CONFIG", "").lower() in {"1", "true", "yes"}
+                if not allow_early:
+                    log.info("Skipping initial Config for GP to keep UI in connecting state")
+                    return False
+
             gateway = self.current_gateway or ''
 
             log.info(f"Emitting initial config (no tundev), gateway {gateway}")
