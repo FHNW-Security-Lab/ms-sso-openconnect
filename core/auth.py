@@ -11,13 +11,14 @@ import base64
 import os
 import re
 import ssl
+import threading
 import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from typing import Optional
 
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from playwright.sync_api import sync_playwright
 
 from .totp import generate_totp
 
@@ -282,6 +283,7 @@ def do_saml_auth(
             return domain_no_dot == vpn_server_host or vpn_server_host.endswith(f".{domain_no_dot}")
 
         wait_url_pattern = re.compile("|".join(re.escape(h) for h in sorted(allowed_hosts) if h))
+        vpn_request_event = threading.Event()
 
         def _wait_for_vpn_callback(timeout_ms: int = 60000) -> None:
             """Wait for the SAML POST/redirect back to the VPN gateway.
@@ -304,24 +306,12 @@ def do_saml_auth(
                 if _is_vpn_url(page.url):
                     return
 
-                remaining_ms = int((deadline - time.time()) * 1000)
-                step_ms = min(5000, max(250, remaining_ms))
-                try:
-                    req = page.wait_for_request(lambda r: _is_vpn_url(r.url), timeout=step_ms)
-                    # Opportunistically parse SAMLResponse from this request if present.
-                    try:
-                        if req and req.post_data and not saml_result.get("saml_response"):
-                            params = urllib.parse.parse_qs(req.post_data)
-                            if "SAMLResponse" in params:
-                                saml_result["saml_response"] = params["SAMLResponse"][0]
-                    except Exception:
-                        pass
+                if vpn_request_event.wait(timeout=0.25):
                     return
-                except PWTimeout:
-                    continue
 
         def handle_request(request):
             if _is_vpn_url(request.url):
+                vpn_request_event.set()
                 if debug:
                     print(f"    [DEBUG] Request to VPN: {request.url[:80]}...")
                     print(f"    [DEBUG] Request method: {request.method}")
@@ -382,7 +372,17 @@ def do_saml_auth(
 
             # Step 1: Open portal
             print(f"  [1/6] Opening SAML portal...")
-            page.goto(start_url, timeout=30000, wait_until="networkidle")
+            for attempt in range(3):
+                try:
+                    page.goto(start_url, timeout=30000, wait_until="networkidle")
+                    break
+                except Exception as e:
+                    if "ERR_NETWORK_CHANGED" in str(e):
+                        if debug:
+                            print("    [DEBUG] Page.goto hit ERR_NETWORK_CHANGED; retrying")
+                        time.sleep(1)
+                        continue
+                    raise
             if debug:
                 page.screenshot(path="/tmp/vpn-step1-portal.png")
                 print("    [DEBUG] Screenshot: /tmp/vpn-step1-portal.png")
