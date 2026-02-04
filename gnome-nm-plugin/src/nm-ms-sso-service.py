@@ -22,6 +22,7 @@ import time
 import logging
 import socket
 import ipaddress
+import shutil
 from pathlib import Path
 
 # Set up logging - use syslog for reliability
@@ -1005,14 +1006,49 @@ class VPNPluginService(dbus.service.Object):
 
     def _emit_disconnected(self):
         """Emit disconnected state (called from main thread)."""
+        self._cleanup_dns()
         self._set_state(NM_VPN_SERVICE_STATE_STOPPED)
         return False
 
     def _emit_failure(self, message):
         """Emit failure (called from main thread)."""
+        self._cleanup_dns()
         self.Failure(NM_VPN_PLUGIN_FAILURE_CONNECT_FAILED)
         self._set_state(NM_VPN_SERVICE_STATE_STOPPED)
         return False
+
+    def _cleanup_dns(self):
+        """Attempt to clear DNS settings left behind on disconnect/failure."""
+        tun_dev = self.current_tun_device
+        if not tun_dev:
+            return
+        if shutil.which("resolvectl"):
+            try:
+                subprocess.run(
+                    ["resolvectl", "revert", tun_dev],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                log.info(f"Reverted DNS settings for {tun_dev}")
+                return
+            except Exception as e:
+                log.info(f"resolvectl revert failed for {tun_dev}: {e}")
+        # Fallback: try resolvconf if present
+        if shutil.which("resolvconf"):
+            try:
+                subprocess.run(
+                    ["resolvconf", "-d", tun_dev],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                log.info(f"Removed resolvconf entry for {tun_dev}")
+            except Exception as e:
+                log.info(f"resolvconf cleanup failed for {tun_dev}: {e}")
+        self.vpn_dns_servers = []
+        self.vpn_domains = []
+        self.current_tun_device = None
 
     # D-Bus methods
     @dbus.service.method(NM_VPN_DBUS_PLUGIN_INTERFACE,
@@ -1061,6 +1097,9 @@ class VPNPluginService(dbus.service.Object):
 
         # Also kill any other openconnect processes with SIGKILL
         subprocess.run(['pkill', '-KILL', '-x', 'openconnect'], capture_output=True)
+
+        # Ensure DNS cleanup even when OpenConnect is SIGKILLed.
+        self._cleanup_dns()
 
         self._set_state(NM_VPN_SERVICE_STATE_STOPPED)
 
