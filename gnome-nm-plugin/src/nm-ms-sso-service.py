@@ -365,6 +365,8 @@ class VPNPluginService(dbus.service.Object):
                 # If no cached cookies or this is a retry, authenticate
                 if not cookies:
                     log.info("Performing SAML authentication...")
+                    self.auth_in_progress = True
+                    self.saml_start_time = time.monotonic()
 
                     # Keep NetworkManager from timing out while SAML is in progress by
                     # periodically emitting an initial Config. (GP MFA can take >60s.)
@@ -437,6 +439,8 @@ class VPNPluginService(dbus.service.Object):
                         traceback.print_exc()
                         raise Exception(f"SAML authentication error: {auth_err}")
                     finally:
+                        self.auth_in_progress = False
+                        self.saml_start_time = None
                         stop_keepalive.set()
 
                     if not cookies:
@@ -660,8 +664,19 @@ class VPNPluginService(dbus.service.Object):
             if self.current_protocol == 'gp':
                 allow_early = os.environ.get("MS_SSO_NM_GP_EARLY_CONFIG", "").lower() in {"1", "true", "yes"}
                 if not allow_early:
-                    log.info("Skipping initial Config for GP to keep UI in connecting state")
-                    return False
+                    delay_env = os.environ.get("MS_SSO_NM_GP_CONFIG_DELAY", "").strip()
+                    try:
+                        delay_seconds = int(delay_env) if delay_env else 45
+                    except Exception:
+                        delay_seconds = 45
+                    if getattr(self, "auth_in_progress", False) and getattr(self, "saml_start_time", None):
+                        elapsed = time.monotonic() - self.saml_start_time
+                        if elapsed < delay_seconds:
+                            log.info(
+                                "Skipping initial Config for GP to keep UI in connecting state "
+                                f"(elapsed {elapsed:.0f}s < {delay_seconds}s)"
+                            )
+                            return False
 
             gateway = self.current_gateway or ''
 
