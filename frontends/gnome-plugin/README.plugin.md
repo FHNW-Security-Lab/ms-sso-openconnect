@@ -182,6 +182,44 @@ MS_SSO_NM_AUTH_TIMEOUT_GUARD_SEC=45
 MS_SSO_NM_GP_AUTH_TIMEOUT_GUARD_SEC=45
 ```
 
+## Watchdog and Auto-Reconnect
+
+The GNOME plugin includes a watchdog and auto-reconnect loop.  
+Default: enabled. If the tunnel drops (network flap, session timeout), it keeps
+reconnecting until the user explicitly disconnects.
+
+Per-connection controls (`nmcli`):
+
+```bash
+# Disable auto-reconnect for one connection
+nmcli connection modify FHNW +vpn.data auto-reconnect=no
+
+# Tune reconnect backoff (seconds)
+nmcli connection modify FHNW +vpn.data reconnect-delay-seconds=5
+nmcli connection modify FHNW +vpn.data reconnect-max-delay-seconds=60
+```
+
+Global environment controls:
+
+```bash
+# Disable/enable auto-reconnect globally
+MS_SSO_NM_AUTO_RECONNECT=0
+MS_SSO_NM_AUTO_RECONNECT=1
+
+# GP-only override
+MS_SSO_NM_GP_AUTO_RECONNECT=1
+
+# Backoff tuning
+MS_SSO_NM_RECONNECT_DELAY_SECONDS=5
+MS_SSO_NM_RECONNECT_MAX_DELAY_SECONDS=60
+MS_SSO_NM_GP_RECONNECT_DELAY_SECONDS=5
+MS_SSO_NM_GP_RECONNECT_MAX_DELAY_SECONDS=60
+
+# Watchdog tuning
+MS_SSO_NM_WATCHDOG_INTERVAL_SECONDS=5
+MS_SSO_NM_WATCHDOG_TUN_MISS_LIMIT=3
+```
+
 ## Architecture
 
 ```

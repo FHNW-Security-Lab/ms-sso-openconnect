@@ -187,6 +187,9 @@ nmcli connection modify <name> +vpn.data disable-cookie-cache=yes
 nmcli connection modify <name> +vpn.data skip-gp-cookie-cache=yes
 nmcli connection modify <name> +vpn.data disable-browser-session-cache=yes
 nmcli connection modify <name> +vpn.data enable-browser-session-cache=yes
+nmcli connection modify <name> +vpn.data auto-reconnect=no
+nmcli connection modify <name> +vpn.data reconnect-delay-seconds=5
+nmcli connection modify <name> +vpn.data reconnect-max-delay-seconds=60
 ```
 
 See `frontends/gnome-plugin/README.plugin.md` for full cache and timeout controls.

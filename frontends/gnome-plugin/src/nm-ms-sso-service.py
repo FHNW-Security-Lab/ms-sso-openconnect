@@ -222,6 +222,9 @@ class VPNPluginService(dbus.service.Object):
         secrets['disable_browser_session_cache'] = vpn_data.get('disable-browser-session-cache', '')
         secrets['enable_browser_session_cache'] = vpn_data.get('enable-browser-session-cache', '')
         secrets['skip_gp_cookie_cache'] = vpn_data.get('skip-gp-cookie-cache', '')
+        secrets['auto_reconnect'] = vpn_data.get('auto-reconnect', '')
+        secrets['reconnect_delay_seconds'] = vpn_data.get('reconnect-delay-seconds', '')
+        secrets['reconnect_max_delay_seconds'] = vpn_data.get('reconnect-max-delay-seconds', '')
 
         # Extract secrets
         secrets['password'] = vpn_secrets.get('password', '')
@@ -301,6 +304,32 @@ class VPNPluginService(dbus.service.Object):
             # Default on: avoids NM connect-timeout for long GP SAML/MFA flows.
             return True
         return value
+
+    def _parse_positive_int(self, value, default: int) -> int:
+        """Parse non-negative integer config values."""
+        if value is None:
+            return default
+        text = str(value).strip()
+        if not text:
+            return default
+        try:
+            parsed = int(text)
+            if parsed >= 0:
+                return parsed
+        except Exception:
+            pass
+        return default
+
+    def _interruptible_sleep(self, seconds: int) -> bool:
+        """Sleep up to `seconds`, aborting early if disconnect is requested."""
+        if seconds <= 0:
+            return not self.cancel_requested
+        end_time = time.monotonic() + seconds
+        while time.monotonic() < end_time:
+            if self.cancel_requested:
+                return False
+            time.sleep(min(0.5, end_time - time.monotonic()))
+        return not self.cancel_requested
 
     def _connect_thread(self, settings):
         """Worker thread for VPN connection."""
@@ -406,153 +435,239 @@ class VPNPluginService(dbus.service.Object):
             # Connection name for cookie cache
             connection_name = f"nm-{gateway}"
             log.debug(f"Cookie cache connection name: {connection_name}")
+            # Auto-reconnect watchdog configuration
+            conn_auto_reconnect = self._parse_bool(secrets.get('auto_reconnect'))
+            env_auto_reconnect = self._parse_bool(os.environ.get("MS_SSO_NM_AUTO_RECONNECT"))
+            gp_env_auto_reconnect = self._parse_bool(os.environ.get("MS_SSO_NM_GP_AUTO_RECONNECT")) if protocol == 'gp' else None
+            if conn_auto_reconnect is not None:
+                auto_reconnect = conn_auto_reconnect
+            elif gp_env_auto_reconnect is not None:
+                auto_reconnect = gp_env_auto_reconnect
+            elif env_auto_reconnect is not None:
+                auto_reconnect = env_auto_reconnect
+            else:
+                auto_reconnect = True
 
-            # Try connection with retry on cookie rejection
-            max_attempts = 2
-            for attempt in range(max_attempts):
-                log.info(f"Connection attempt {attempt + 1}/{max_attempts}")
-                if self.cancel_requested:
-                    log.info("Connect cancelled before authentication; aborting")
-                    return
+            reconnect_delay_seconds = self._parse_positive_int(
+                secrets.get('reconnect_delay_seconds'),
+                self._parse_positive_int(
+                    os.environ.get("MS_SSO_NM_GP_RECONNECT_DELAY_SECONDS") if protocol == 'gp' else None,
+                    self._parse_positive_int(os.environ.get("MS_SSO_NM_RECONNECT_DELAY_SECONDS"), 5),
+                ),
+            )
+            reconnect_max_delay_seconds = self._parse_positive_int(
+                secrets.get('reconnect_max_delay_seconds'),
+                self._parse_positive_int(
+                    os.environ.get("MS_SSO_NM_GP_RECONNECT_MAX_DELAY_SECONDS") if protocol == 'gp' else None,
+                    self._parse_positive_int(os.environ.get("MS_SSO_NM_RECONNECT_MAX_DELAY_SECONDS"), 60),
+                ),
+            )
+            reconnect_reset_seconds = self._parse_positive_int(os.environ.get("MS_SSO_NM_RECONNECT_RESET_SECONDS"), 120)
+            watchdog_interval_seconds = self._parse_positive_int(os.environ.get("MS_SSO_NM_WATCHDOG_INTERVAL_SECONDS"), 5)
+            watchdog_missing_tun_limit = self._parse_positive_int(os.environ.get("MS_SSO_NM_WATCHDOG_TUN_MISS_LIMIT"), 3)
+            log.info(
+                "Auto-reconnect: "
+                f"{'enabled' if auto_reconnect else 'disabled'}, "
+                f"delay={reconnect_delay_seconds}s, max-delay={reconnect_max_delay_seconds}s"
+            )
 
-                # Try cached cookies first (unless explicitly disabled).
-                cookies = None
-                used_cache = False
+            reconnect_attempt = 0
+            while not self.cancel_requested:
+                # Try connection with retry on cookie rejection.
+                max_attempts = 2
+                connection_ended = False
+                connection_uptime_seconds = 0
+                final_error = None
 
-                if attempt == 0 and skip_gp_cookie_cache:
-                    log.info("GlobalProtect cookie cache disabled by configuration; forcing fresh authentication")
-                elif attempt == 0 and disable_cookie_cache:
-                    log.info("Cookie cache disabled; forcing fresh authentication")
-                elif attempt == 0:
-                    log.debug("Checking for cached cookies...")
-                    cached = get_nm_stored_cookies(connection_name, max_age_hours=12)
-                    if cached:
-                        # cached is tuple (cookies_dict, usergroup)
-                        cookies, usergroup = cached
-                        used_cache = True
-                        log.info(f"Using cached cookies (keys: {list(cookies.keys()) if cookies else 'none'})")
-                        # Debug: write cached cookies to file for comparison
-                        try:
-                            with open('/tmp/nm-vpn-cached-cookies.json', 'w') as f:
-                                json.dump({"source": "cache", "cookies": cookies, "usergroup": usergroup}, f, indent=2)
-                            log.debug(f"Cached cookies written to /tmp/nm-vpn-cached-cookies.json")
-                        except Exception as e:
-                            log.debug(f"Could not write cached cookies debug file: {e}")
-                    else:
-                        log.info("No valid cached cookies found")
-
-                # If no cached cookies or this is a retry, authenticate
-                if not cookies:
-                    log.info("Performing SAML authentication...")
-                    self.auth_in_progress = True
-                    self.saml_start_time = time.monotonic()
-                    self._auth_started_guard_triggered = False
-
-                    # Keep NetworkManager from timing out while SAML is in progress by
-                    # periodically emitting an initial Config. (GP MFA can take >60s.)
-                    stop_keepalive = threading.Event()
-
-                    def _saml_keepalive():
-                        while not stop_keepalive.wait(15):
-                            if self.cancel_requested:
-                                return
-                            if protocol != 'gp' or self._gp_initial_config_allowed():
-                                GLib.idle_add(self._emit_initial_config)
-                            # Keep NetworkManager from thinking the connection stalled.
-                            if self._should_emit_started_keepalive(protocol):
-                                GLib.idle_add(self._emit_started_keepalive)
-                            else:
-                                GLib.idle_add(self._emit_starting_keepalive)
-
-                    keepalive_thread = threading.Thread(target=_saml_keepalive, daemon=True)
-                    keepalive_thread.start()
-
-                    # Ensure playwright can find the browser
-                    # Check multiple possible locations
-                    import glob
-                    browser_paths = [
-                        "/root/.cache/ms-playwright",
-                        "/var/cache/ms-playwright",
-                    ]
-                    # Expand user home directories
-                    home_paths = glob.glob("/home/*/.cache/ms-playwright")
-                    browser_paths.extend(home_paths)
-
-                    # Try to find existing playwright installation
-                    playwright_path_found = False
-                    for p in browser_paths:
-                        if not os.path.isdir(p):
-                            continue
-                        # Check for chromium directory (e.g., chromium-1234)
-                        chromium_dirs = glob.glob(os.path.join(p, "chromium*"))
-                        if chromium_dirs:
-                            os.environ['PLAYWRIGHT_BROWSERS_PATH'] = p
-                            log.info(f"Using playwright browsers from: {p}")
-                            playwright_path_found = True
-                            break
-
-                    if not playwright_path_found:
-                        log.warning(f"No playwright browser found in any of: {browser_paths}")
-
-                    try:
-                        cookies = do_saml_auth(
-                            vpn_server=gateway,
-                            vpn_server_ip=self.current_gateway_ip,
-                            username=username,
-                            password=password,
-                            totp_secret=totp_secret,
-                            auto_totp=True,
-                            headless=True,
-                            debug=True,  # Enable debug to see screenshots
-                            protocol=protocol,  # Pass protocol for correct SAML URL
-                            disable_browser_session_cache=disable_browser_session_cache,
-                        )
-                        log.info(f"SAML auth returned cookies: {list(cookies.keys()) if cookies else 'none'}")
-                        # Debug: write fresh cookies to file for comparison
-                        try:
-                            with open('/tmp/nm-vpn-fresh-cookies.json', 'w') as f:
-                                json.dump({"source": "fresh_saml", "cookies": cookies}, f, indent=2)
-                            log.debug(f"Fresh cookies written to /tmp/nm-vpn-fresh-cookies.json")
-                        except Exception as e:
-                            log.debug(f"Could not write fresh cookies debug file: {e}")
-                    except Exception as auth_err:
-                        log.error(f"SAML auth error: {auth_err}")
-                        import traceback
-                        traceback.print_exc()
-                        raise Exception(f"SAML authentication error: {auth_err}")
-                    finally:
-                        self.auth_in_progress = False
-                        self.saml_start_time = None
-                        self._auth_started_guard_triggered = False
-                        stop_keepalive.set()
-
-                    if not cookies:
-                        raise Exception("SAML authentication returned no cookies")
-
+                for attempt in range(max_attempts):
+                    log.info(f"Connection attempt {attempt + 1}/{max_attempts}")
                     if self.cancel_requested:
-                        log.info("Connect cancelled during authentication; aborting")
+                        log.info("Connect cancelled before authentication; aborting")
                         return
 
-                    # Store fresh cookies unless cache is explicitly disabled.
-                    if not disable_cookie_cache and not skip_gp_cookie_cache:
-                        store_nm_cookies(connection_name, cookies, usergroup='portal:prelogin-cookie')
+                    # Try cached cookies first (unless explicitly disabled).
+                    cookies = None
+                    used_cache = False
 
-                # Try to connect with these cookies
+                    if attempt == 0 and skip_gp_cookie_cache:
+                        log.info("GlobalProtect cookie cache disabled by configuration; forcing fresh authentication")
+                    elif attempt == 0 and disable_cookie_cache:
+                        log.info("Cookie cache disabled; forcing fresh authentication")
+                    elif attempt == 0:
+                        log.debug("Checking for cached cookies...")
+                        cached = get_nm_stored_cookies(connection_name, max_age_hours=12)
+                        if cached:
+                            # cached is tuple (cookies_dict, usergroup)
+                            cookies, usergroup = cached
+                            used_cache = True
+                            log.info(f"Using cached cookies (keys: {list(cookies.keys()) if cookies else 'none'})")
+                            # Debug: write cached cookies to file for comparison
+                            try:
+                                with open('/tmp/nm-vpn-cached-cookies.json', 'w') as f:
+                                    json.dump({"source": "cache", "cookies": cookies, "usergroup": usergroup}, f, indent=2)
+                                log.debug(f"Cached cookies written to /tmp/nm-vpn-cached-cookies.json")
+                            except Exception as e:
+                                log.debug(f"Could not write cached cookies debug file: {e}")
+                        else:
+                            log.info("No valid cached cookies found")
+
+                    # If no cached cookies or this is a retry, authenticate
+                    if not cookies:
+                        log.info("Performing SAML authentication...")
+                        self.auth_in_progress = True
+                        self.saml_start_time = time.monotonic()
+                        self._auth_started_guard_triggered = False
+
+                        # Keep NetworkManager from timing out while SAML is in progress by
+                        # periodically emitting an initial Config. (GP MFA can take >60s.)
+                        stop_keepalive = threading.Event()
+
+                        def _saml_keepalive():
+                            while not stop_keepalive.wait(15):
+                                if self.cancel_requested:
+                                    return
+                                if protocol != 'gp' or self._gp_initial_config_allowed():
+                                    GLib.idle_add(self._emit_initial_config)
+                                # Keep NetworkManager from thinking the connection stalled.
+                                if self._should_emit_started_keepalive(protocol):
+                                    GLib.idle_add(self._emit_started_keepalive)
+                                else:
+                                    GLib.idle_add(self._emit_starting_keepalive)
+
+                        keepalive_thread = threading.Thread(target=_saml_keepalive, daemon=True)
+                        keepalive_thread.start()
+
+                        # Ensure playwright can find the browser.
+                        import glob
+                        browser_paths = [
+                            "/root/.cache/ms-playwright",
+                            "/var/cache/ms-playwright",
+                        ]
+                        # Expand user home directories
+                        home_paths = glob.glob("/home/*/.cache/ms-playwright")
+                        browser_paths.extend(home_paths)
+
+                        # Try to find existing playwright installation
+                        playwright_path_found = False
+                        for p in browser_paths:
+                            if not os.path.isdir(p):
+                                continue
+                            # Check for chromium directory (e.g., chromium-1234)
+                            chromium_dirs = glob.glob(os.path.join(p, "chromium*"))
+                            if chromium_dirs:
+                                os.environ['PLAYWRIGHT_BROWSERS_PATH'] = p
+                                log.info(f"Using playwright browsers from: {p}")
+                                playwright_path_found = True
+                                break
+
+                        if not playwright_path_found:
+                            log.warning(f"No playwright browser found in any of: {browser_paths}")
+
+                        try:
+                            cookies = do_saml_auth(
+                                vpn_server=gateway,
+                                vpn_server_ip=self.current_gateway_ip,
+                                username=username,
+                                password=password,
+                                totp_secret=totp_secret,
+                                auto_totp=True,
+                                headless=True,
+                                debug=True,  # Enable debug to see screenshots
+                                protocol=protocol,  # Pass protocol for correct SAML URL
+                                disable_browser_session_cache=disable_browser_session_cache,
+                            )
+                            log.info(f"SAML auth returned cookies: {list(cookies.keys()) if cookies else 'none'}")
+                            # Debug: write fresh cookies to file for comparison
+                            try:
+                                with open('/tmp/nm-vpn-fresh-cookies.json', 'w') as f:
+                                    json.dump({"source": "fresh_saml", "cookies": cookies}, f, indent=2)
+                                log.debug(f"Fresh cookies written to /tmp/nm-vpn-fresh-cookies.json")
+                            except Exception as e:
+                                log.debug(f"Could not write fresh cookies debug file: {e}")
+                        except Exception as auth_err:
+                            log.error(f"SAML auth error: {auth_err}")
+                            import traceback
+                            traceback.print_exc()
+                            raise Exception(f"SAML authentication error: {auth_err}")
+                        finally:
+                            self.auth_in_progress = False
+                            self.saml_start_time = None
+                            self._auth_started_guard_triggered = False
+                            stop_keepalive.set()
+
+                        if not cookies:
+                            raise Exception("SAML authentication returned no cookies")
+
+                        if self.cancel_requested:
+                            log.info("Connect cancelled during authentication; aborting")
+                            return
+
+                        # Store fresh cookies unless cache is explicitly disabled.
+                        if not disable_cookie_cache and not skip_gp_cookie_cache:
+                            store_nm_cookies(connection_name, cookies, usergroup='portal:prelogin-cookie')
+
+                    # Try to connect with these cookies
+                    if self.cancel_requested:
+                        log.info("Connect cancelled before starting OpenConnect; aborting")
+                        return
+                    success, error_msg, uptime_seconds = self._attempt_vpn_connection(
+                        gateway,
+                        protocol,
+                        cookies,
+                        username,
+                        watchdog_interval_seconds=watchdog_interval_seconds,
+                        watchdog_missing_tun_limit=watchdog_missing_tun_limit,
+                    )
+
+                    if success:
+                        connection_ended = True
+                        connection_uptime_seconds = uptime_seconds
+                        log.info("VPN connection established and later ended")
+                        break
+                    elif used_cache and attempt < max_attempts - 1:
+                        # Cookie was rejected, clear cache and retry with fresh auth
+                        log.warning("Cookie rejected, clearing cache and re-authenticating...")
+                        clear_nm_cookies(connection_name)
+                        continue
+                    else:
+                        final_error = error_msg or "VPN connection failed"
+                        break
+
                 if self.cancel_requested:
-                    log.info("Connect cancelled before starting OpenConnect; aborting")
                     return
-                success, error_msg = self._attempt_vpn_connection(gateway, protocol, cookies, username)
 
-                if success:
-                    log.info("VPN connection successful")
-                    break  # Connection successful
-                elif used_cache and attempt < max_attempts - 1:
-                    # Cookie was rejected, clear cache and retry with fresh auth
-                    log.warning("Cookie rejected, clearing cache and re-authenticating...")
-                    clear_nm_cookies(connection_name)
-                    continue
+                if not connection_ended:
+                    raise Exception(final_error or "VPN connection failed")
+
+                # Connection was up and then ended (e.g., network loss/session timeout).
+                if connection_uptime_seconds >= reconnect_reset_seconds:
+                    reconnect_attempt = 0
                 else:
-                    raise Exception(error_msg or "VPN connection failed")
+                    reconnect_attempt += 1
+
+                if not auto_reconnect:
+                    GLib.idle_add(self._emit_disconnected)
+                    return
+
+                self._cleanup_dns()
+                backoff_step = min(max(reconnect_attempt - 1, 0), 6)
+                delay_seconds = min(
+                    reconnect_delay_seconds * (2 ** backoff_step),
+                    reconnect_max_delay_seconds,
+                ) if reconnect_max_delay_seconds > 0 else reconnect_delay_seconds
+                log.warning(
+                    "Watchdog: VPN tunnel ended unexpectedly "
+                    f"(uptime={connection_uptime_seconds}s); reconnecting in {delay_seconds}s "
+                    f"(attempt {reconnect_attempt})"
+                )
+                if protocol == 'gp' and self._gp_early_started_enabled():
+                    GLib.idle_add(self._emit_started_keepalive)
+                else:
+                    GLib.idle_add(self._emit_starting_keepalive)
+                if protocol != 'gp' or self._gp_initial_config_allowed():
+                    GLib.idle_add(self._emit_initial_config)
+                if not self._interruptible_sleep(delay_seconds):
+                    return
 
         except Exception as e:
             error_msg = str(e)
@@ -561,11 +676,22 @@ class VPNPluginService(dbus.service.Object):
             traceback.print_exc()
             GLib.idle_add(lambda msg=error_msg: self._emit_failure(msg))
 
-    def _attempt_vpn_connection(self, gateway, protocol, cookies, username=None):
+    def _attempt_vpn_connection(
+            self,
+            gateway,
+            protocol,
+            cookies,
+            username=None,
+            watchdog_interval_seconds=5,
+            watchdog_missing_tun_limit=3,
+    ):
         """Attempt to establish VPN connection with given cookies.
 
         Returns:
-            Tuple of (success: bool, error_message: str or None)
+            Tuple of:
+                success: tunnel was established at least once
+                error_message: connection error details when success=False
+                uptime_seconds: connected runtime before exit (0 on failure)
         """
         try:
             # Log cookie info for debugging
@@ -708,8 +834,8 @@ class VPNPluginService(dbus.service.Object):
             if not connected:
                 # Check if it's a cookie rejection
                 if 'cookie' in output_buffer.lower() and ('reject' in output_buffer.lower() or 'invalid' in output_buffer.lower() or 'fail' in output_buffer.lower()):
-                    return (False, "Cookie rejected by server")
-                return (False, "VPN connection timeout")
+                    return (False, "Cookie rejected by server", 0)
+                return (False, "VPN connection timeout", 0)
 
             # Give vpnc-script a moment to configure DNS
             time.sleep(1)
@@ -719,21 +845,67 @@ class VPNPluginService(dbus.service.Object):
             # Emit full IP config now that interface is up
             GLib.idle_add(self._emit_connected)
 
-            # Wait for process to exit
-            self.vpn_process.wait()
+            # Watchdog loop: keep an eye on process and tunnel device.
+            connected_at = time.monotonic()
+            missing_tun_checks = 0
+            watch_interval = max(1, int(watchdog_interval_seconds))
+            tun_miss_limit = max(1, int(watchdog_missing_tun_limit))
+            while self.vpn_process.poll() is None:
+                if self.cancel_requested:
+                    break
+                tun_dev = self.current_tun_device
+                if tun_dev:
+                    check = subprocess.run(
+                        ["ip", "link", "show", tun_dev],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if check.returncode != 0:
+                        missing_tun_checks += 1
+                        log.warning(
+                            "Watchdog: missing tunnel device "
+                            f"{tun_dev} ({missing_tun_checks}/{tun_miss_limit})"
+                        )
+                        if missing_tun_checks >= tun_miss_limit:
+                            log.warning("Watchdog: tunnel device vanished; restarting connection")
+                            try:
+                                self.vpn_process.kill()
+                            except Exception:
+                                pass
+                            break
+                    else:
+                        missing_tun_checks = 0
+                time.sleep(watch_interval)
 
-            # Connection ended
-            GLib.idle_add(self._emit_disconnected)
+            # Wait for process to fully exit and report uptime
+            try:
+                exit_code = self.vpn_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                exit_code = self.vpn_process.poll()
+                if exit_code is None:
+                    log.warning("Watchdog: OpenConnect did not exit in time; forcing kill")
+                    try:
+                        self.vpn_process.kill()
+                    except Exception:
+                        pass
+                    try:
+                        exit_code = self.vpn_process.wait(timeout=5)
+                    except Exception:
+                        exit_code = self.vpn_process.poll()
+            uptime_seconds = int(max(0, time.monotonic() - connected_at))
+            if exit_code not in (0, None) and not self.cancel_requested:
+                log.warning(f"OpenConnect exited with code {exit_code} after {uptime_seconds}s")
 
-            return (True, None)
+            return (True, None, uptime_seconds)
 
         except Exception as e:
             error_msg = str(e)
             log.info(f"Attempt error: {error_msg}")
             # Check if it's a cookie rejection error
             if 'cookie' in error_msg.lower() and ('reject' in error_msg.lower() or 'invalid' in error_msg.lower()):
-                return (False, "Cookie rejected by server")
-            return (False, error_msg)
+                return (False, "Cookie rejected by server", 0)
+            return (False, error_msg, 0)
 
     def _emit_initial_config(self):
         """Emit initial Config signal before interface is created (called from main thread).
