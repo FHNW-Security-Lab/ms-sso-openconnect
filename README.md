@@ -124,7 +124,8 @@ chmod +x ms-sso-openconnect
 
 ```
 codebase/                # Shared architecture docs and runtime contracts
-core/                    # Shared auth/connect logic used by all frontends
+codebase/core/           # Shared auth/connect logic used by all frontends
+codebase/ui/             # Shared Qt codebase used by Linux/macOS frontends
 ms-sso-openconnect.py    # CLI entry point
 ms-sso-openconnect       # CLI bootstrap wrapper
 
@@ -136,8 +137,8 @@ frontends/
 build/                   # Unified build entrypoints
 └── build.sh             # Main dispatcher for pkg/deb/appimage/nix
 
-ui/                      # Qt frontend implementation (Linux + macOS)
-gnome-nm-plugin/         # GNOME NetworkManager plugin implementation
+ui/                      # Legacy compatibility path (wrappers)
+gnome-nm-plugin/         # Legacy compatibility path (wrappers/artifacts)
 nix/                     # Nix/NixOS packaging support
 ```
 

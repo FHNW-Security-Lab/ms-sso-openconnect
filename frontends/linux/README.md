@@ -14,6 +14,7 @@ Artifacts are collected in `dist/linux/`.
 
 ## Implementation Source
 
-- Qt app source: `ui/src/vpn_ui/`
-- Linux packaging assets: `ui/packaging/linux/`
-- Legacy build script (still supported): `ui/scripts/build-linux.sh`
+- Shared Qt app source: `codebase/ui/src/vpn_ui/`
+- Shared runtime: `codebase/core/`
+- Linux packaging assets: `frontends/linux/packaging/`
+- Linux builder: `frontends/linux/scripts/build-linux.sh`

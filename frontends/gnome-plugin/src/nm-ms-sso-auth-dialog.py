@@ -27,11 +27,12 @@ def _setup_core_module():
     except ImportError:
         pass
 
-    # Development: nm-plugin/src/nm-ms-sso-auth-dialog.py -> ../../ -> project root
-    project_root = Path(__file__).parent.parent.parent
-    if project_root.exists() and (project_root / "core").exists():
-        if str(project_root) not in sys.path:
-            sys.path.insert(0, str(project_root))
+    # Development: frontends/gnome-plugin/src -> ../../.. -> repo root
+    repo_root = Path(__file__).resolve().parents[3]
+    codebase_root = repo_root / "codebase"
+    if codebase_root.exists() and (codebase_root / "core").exists():
+        if str(codebase_root) not in sys.path:
+            sys.path.insert(0, str(codebase_root))
         return
 
     # System installation paths

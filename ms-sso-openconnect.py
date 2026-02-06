@@ -23,10 +23,11 @@ import getpass
 import sys
 from pathlib import Path
 
-# Add project root to path for development
+# Add codebase directory to path for development
 project_root = Path(__file__).parent
-if (project_root / "core").exists():
-    sys.path.insert(0, str(project_root))
+codebase_root = project_root / "codebase"
+if (codebase_root / "core").exists():
+    sys.path.insert(0, str(codebase_root))
 
 # Import from core module
 from core import (

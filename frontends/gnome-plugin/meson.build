@@ -67,13 +67,7 @@ install_data('data/nm-ms-sso-service.conf',
   install_dir: join_paths(datadir, 'dbus-1', 'system.d'),
 )
 
-# Install core Python module
-# Try local file first (for deb builds), then parent directory
-ms_sso_core_py = files('ms-sso-openconnect.py')
-install_data(
-  ms_sso_core_py,
-  install_dir: join_paths(datadir, 'ms-sso-openconnect'),
-)
+# Core runtime is installed by packaging/install scripts from codebase/core.
 
 # Summary
 summary({

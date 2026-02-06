@@ -12,30 +12,30 @@ MS SSO OpenConnect is a multi-platform VPN connection tool for Microsoft SSO-pro
 ## Architecture
 
 ```
-core/                    # Unified core module (shared by ALL frontends)
-├── auth.py             # SAML auth via Playwright headless browser
-├── config.py           # Credentials in system keyring
-├── connect.py          # openconnect subprocess wrapper
-├── cookies.py          # Session cookie caching (12h TTL)
-└── totp.py             # TOTP 2FA generation
+codebase/core/           # Unified core module (shared by ALL frontends)
+├── auth.py              # SAML auth via Playwright headless browser
+├── config.py            # Credentials in system keyring
+├── connect.py           # openconnect subprocess wrapper
+├── cookies.py           # Session cookie caching (12h TTL)
+└── totp.py              # TOTP 2FA generation
 
 ms-sso-openconnect.py   # CLI entry point
 
-ui/                     # Unified Qt6 GUI (Linux + macOS)
-├── src/vpn_ui/         # Shared UI code
+codebase/ui/            # Shared Qt6 UI code (Linux + macOS)
+├── src/vpn_ui/         # Shared UI source
 │   ├── main.py         # Application controller
 │   ├── tray.py         # System tray
 │   ├── worker.py       # Async VPN operations
 │   ├── backend/        # Backend abstraction layer
 │   └── platform/       # Platform-specific (notifications, autostart, backend)
-├── macos/daemon/       # macOS LaunchDaemon (runs as root)
-└── scripts/            # Build scripts (build-linux.sh, build-macos.sh)
 
-gnome-nm-plugin/        # GNOME NetworkManager VPN plugin (D-Bus + GTK4)
+frontends/linux/        # Linux packaging/build frontend
+frontends/osx/          # macOS packaging/build frontend (+ daemon)
+frontends/gnome-plugin/ # GNOME NetworkManager VPN plugin (D-Bus + GTK4)
 ```
 
 **Key Patterns**:
-- All frontends import from `core/` - never duplicate core logic
+- All frontends import from `codebase/core/` - never duplicate core logic
 - UI uses platform detection (`sys.platform`) for Linux/macOS differences
 - macOS uses LaunchDaemon for passwordless VPN connections (SIGTERM for graceful shutdown)
 - Linux uses pkexec for privilege escalation (SIGKILL for fast disconnect)
@@ -50,28 +50,23 @@ chmod +x ms-sso-openconnect
 
 ### Unified UI (Linux)
 ```bash
-cd ui
-./scripts/build-linux.sh [version]    # Build AppImage + .deb
-./scripts/build-linux.sh 2.0.0 appimage  # AppImage only
-./scripts/build-linux.sh 2.0.0 deb       # Debian package only
+./frontends/linux/build.sh [version] [appimage|deb|all]
 ```
 
 ### Unified UI (macOS)
 ```bash
-cd ui
-./scripts/build-macos.sh [version]    # Build .pkg with daemon
+./frontends/osx/build.sh [version]    # Build .pkg with daemon
 ```
 
 ### GNOME NetworkManager Plugin
 ```bash
-cd gnome-nm-plugin
-./build-deb.sh                # Build .deb with meson
+./frontends/gnome-plugin/build.sh     # Build .deb with meson
 ```
 
 ## Testing
 
 ```bash
-pytest ui/tests/              # Run all tests (when available)
+pytest codebase/ui/tests/     # Run all tests (when available)
 python -m vpn_ui              # Run UI from source
 ```
 
@@ -108,8 +103,8 @@ python -m vpn_ui              # Run UI from source
 ## Key Files for Understanding Flow
 
 1. `ms-sso-openconnect.py` - CLI entry, shows command patterns
-2. `core/auth.py` - SAML browser automation (most complex)
-3. `ui/src/vpn_ui/backend/shared.py` - How GUI wraps core module
-4. `ui/src/vpn_ui/platform/backend.py` - Platform-specific connect/disconnect
-5. `ui/macos/daemon/vpn_daemon.py` - macOS daemon implementation
-6. `gnome-nm-plugin/src/nm-ms-sso-service.py` - D-Bus VPN service implementation
+2. `codebase/core/auth.py` - SAML browser automation (most complex)
+3. `codebase/ui/src/vpn_ui/backend/shared.py` - How GUI wraps core module
+4. `codebase/ui/src/vpn_ui/platform/backend.py` - Platform-specific connect/disconnect
+5. `frontends/osx/daemon/vpn_daemon.py` - macOS daemon implementation
+6. `frontends/gnome-plugin/src/nm-ms-sso-service.py` - D-Bus VPN service implementation

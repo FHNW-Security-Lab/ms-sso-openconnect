@@ -28,7 +28,7 @@ python3Packages.buildPythonApplication rec {
   version = "2.0.0";
   format = "other";
 
-  src = lib.cleanSource ../gnome-nm-plugin;
+  src = lib.cleanSource ../frontends/gnome-plugin;
 
   nativeBuildInputs = [
     meson

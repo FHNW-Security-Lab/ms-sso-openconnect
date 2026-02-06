@@ -6,4 +6,4 @@ This directory provides platform-specific frontend entrypoints.
 - `frontends/osx/` - Qt desktop app packaging for macOS (`pkg`)
 - `frontends/gnome-plugin/` - NetworkManager GNOME plugin packaging (`deb`)
 
-Each frontend wrapper delegates to the implementation code currently located in `ui/` and `gnome-nm-plugin/` and collects artifacts under top-level `dist/`.
+Shared implementation is centralized under `codebase/` and consumed by these frontends. Artifacts are collected under top-level `dist/`.

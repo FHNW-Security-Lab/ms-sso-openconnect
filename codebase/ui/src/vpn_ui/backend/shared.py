@@ -80,10 +80,12 @@ def _setup_core_module():
     # Paths to search for core module
     search_paths = []
 
-    # Development: ui/src/vpn_ui/backend/shared.py -> ../../../../core
-    project_root = Path(__file__).resolve().parent.parent.parent.parent.parent
-    if (project_root / "core").exists():
-        search_paths.append(project_root)
+    # Development layout:
+    # codebase/ui/src/vpn_ui/backend/shared.py -> ../../../../.. -> repo root
+    repo_root = Path(__file__).resolve().parents[5]
+    codebase_root = repo_root / "codebase"
+    if (codebase_root / "core").exists():
+        search_paths.append(codebase_root)
 
     # macOS app bundle
     if sys.platform == "darwin":

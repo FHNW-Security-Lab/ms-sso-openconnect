@@ -14,6 +14,7 @@ Artifacts are collected in `dist/gnome-plugin/deb/`.
 
 ## Implementation Source
 
-- Plugin service/editor source: `gnome-nm-plugin/src/`
-- Debian packaging assets: `gnome-nm-plugin/packaging/debian/`
-- Legacy build script (still supported): `gnome-nm-plugin/build-deb.sh`
+- Plugin service/editor source: `frontends/gnome-plugin/src/`
+- Debian packaging assets: `frontends/gnome-plugin/packaging/debian/`
+- Shared runtime: `codebase/core/`
+- Debian builder: `frontends/gnome-plugin/build-deb.sh`

@@ -14,6 +14,7 @@ Artifacts are collected in `dist/osx/pkg/`.
 
 ## Implementation Source
 
-- Qt app source: `ui/src/vpn_ui/`
-- macOS daemon source: `ui/macos/daemon/`
-- Legacy build script (still supported): `ui/scripts/build-macos.sh`
+- Shared Qt app source: `codebase/ui/src/vpn_ui/`
+- Shared runtime: `codebase/core/`
+- macOS daemon source: `frontends/osx/daemon/`
+- macOS builder: `frontends/osx/scripts/build-macos.sh`

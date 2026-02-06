@@ -19,7 +19,7 @@ python3Packages.buildPythonPackage rec {
   installPhase = ''
     runHook preInstall
     mkdir -p $out/${python3Packages.python.sitePackages}
-    cp -r core $out/${python3Packages.python.sitePackages}/
+    cp -r codebase/core $out/${python3Packages.python.sitePackages}/core
     runHook postInstall
   '';
 

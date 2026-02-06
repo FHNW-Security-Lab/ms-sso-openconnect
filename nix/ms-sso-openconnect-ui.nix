@@ -13,7 +13,7 @@ python3Packages.buildPythonApplication rec {
   version = "2.0.0";
   pyproject = true;
 
-  src = ../ui;
+  src = ../codebase/ui;
 
   nativeBuildInputs = [
     qt6.wrapQtAppsHook
@@ -56,10 +56,10 @@ python3Packages.buildPythonApplication rec {
   '';
 
   postInstall = ''
-    install -Dm644 packaging/linux/desktop/ms-sso-openconnect-ui.desktop -t $out/share/applications
+    install -Dm644 ${../frontends/linux/packaging/desktop/ms-sso-openconnect-ui.desktop} -t $out/share/applications
     install -Dm644 src/vpn_ui/resources/icons/app-icon.svg \
       $out/share/icons/hicolor/scalable/apps/ms-sso-openconnect-ui.svg
-    install -Dm644 packaging/linux/polkit/org.openconnect.policy \
+    install -Dm644 ${../frontends/linux/packaging/polkit/org.openconnect.policy} \
       $out/share/polkit-1/actions/org.openconnect.policy
 
     substituteInPlace $out/share/polkit-1/actions/org.openconnect.policy \
