@@ -221,6 +221,7 @@ class VPNPluginService(dbus.service.Object):
         secrets['disable_cookie_cache'] = vpn_data.get('disable-cookie-cache', '')
         secrets['disable_browser_session_cache'] = vpn_data.get('disable-browser-session-cache', '')
         secrets['enable_browser_session_cache'] = vpn_data.get('enable-browser-session-cache', '')
+        secrets['skip_gp_cookie_cache'] = vpn_data.get('skip-gp-cookie-cache', '')
 
         # Extract secrets
         secrets['password'] = vpn_secrets.get('password', '')
@@ -318,6 +319,13 @@ class VPNPluginService(dbus.service.Object):
                 self._is_truthy(secrets.get('disable_cookie_cache'))
                 or self._is_truthy(os.environ.get("MS_SSO_NM_DISABLE_COOKIE_CACHE"))
             )
+            skip_gp_cookie_cache = (
+                protocol == 'gp'
+                and (
+                    self._is_truthy(secrets.get('skip_gp_cookie_cache'))
+                    or self._is_truthy(os.environ.get("MS_SSO_NM_GP_SKIP_COOKIE_CACHE"))
+                )
+            )
             force_enable_browser_session_cache = (
                 self._is_truthy(secrets.get('enable_browser_session_cache'))
                 or self._is_truthy(os.environ.get("MS_SSO_NM_ENABLE_BROWSER_SESSION_CACHE"))
@@ -407,13 +415,12 @@ class VPNPluginService(dbus.service.Object):
                     log.info("Connect cancelled before authentication; aborting")
                     return
 
-                # Try cached cookies first (only on first attempt, not for GlobalProtect)
-                # GlobalProtect prelogin-cookie has very short TTL, so always re-auth
+                # Try cached cookies first (unless explicitly disabled).
                 cookies = None
                 used_cache = False
 
-                if attempt == 0 and protocol == 'gp':
-                    log.info("GlobalProtect: skipping cookie cache (short TTL)")
+                if attempt == 0 and skip_gp_cookie_cache:
+                    log.info("GlobalProtect cookie cache disabled by configuration; forcing fresh authentication")
                 elif attempt == 0 and disable_cookie_cache:
                     log.info("Cookie cache disabled; forcing fresh authentication")
                 elif attempt == 0:
@@ -526,8 +533,8 @@ class VPNPluginService(dbus.service.Object):
                         log.info("Connect cancelled during authentication; aborting")
                         return
 
-                    # Store fresh cookies using NM-specific storage (skip GlobalProtect - short TTL)
-                    if protocol != 'gp':
+                    # Store fresh cookies unless cache is explicitly disabled.
+                    if not disable_cookie_cache and not skip_gp_cookie_cache:
                         store_nm_cookies(connection_name, cookies, usergroup='portal:prelogin-cookie')
 
                 # Try to connect with these cookies

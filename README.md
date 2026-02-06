@@ -179,10 +179,12 @@ nix/                     # Nix/NixOS packaging support
 - Cookies expire after 12 hours or when rejected by server
 
 For GNOME NetworkManager plugin connections, caching can be controlled per
-connection with `vpn.data` keys:
+connection with `vpn.data` keys. By default, cookie cache and browser session
+cache are enabled for both AnyConnect and GlobalProtect:
 
 ```bash
 nmcli connection modify <name> +vpn.data disable-cookie-cache=yes
+nmcli connection modify <name> +vpn.data skip-gp-cookie-cache=yes
 nmcli connection modify <name> +vpn.data disable-browser-session-cache=yes
 nmcli connection modify <name> +vpn.data enable-browser-session-cache=yes
 ```

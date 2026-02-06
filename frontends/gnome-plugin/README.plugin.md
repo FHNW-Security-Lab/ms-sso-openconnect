@@ -116,11 +116,16 @@ The GNOME plugin has two independent caches:
 1. **VPN session cookie cache** (fast reconnect using VPN cookies)
 2. **Browser session cache** (Playwright profile to reuse Microsoft login state)
 
+Default: both caches are enabled (AnyConnect and GlobalProtect).
+
 ### Per-connection toggles (`nmcli`)
 
 ```bash
 # Disable VPN cookie cache for one connection
 nmcli connection modify FHNW +vpn.data disable-cookie-cache=yes
+
+# Disable GlobalProtect cookie cache only (default is enabled)
+nmcli connection modify Unibas +vpn.data skip-gp-cookie-cache=yes
 
 # Disable browser session reuse for one connection
 nmcli connection modify FHNW +vpn.data disable-browser-session-cache=yes
@@ -133,6 +138,7 @@ To revert to default behavior, remove the keys:
 
 ```bash
 nmcli connection modify FHNW -vpn.data disable-cookie-cache
+nmcli connection modify Unibas -vpn.data skip-gp-cookie-cache
 nmcli connection modify FHNW -vpn.data disable-browser-session-cache
 nmcli connection modify Unibas -vpn.data enable-browser-session-cache
 ```
@@ -142,6 +148,9 @@ nmcli connection modify Unibas -vpn.data enable-browser-session-cache
 ```bash
 # Disable VPN cookie cache globally
 MS_SSO_NM_DISABLE_COOKIE_CACHE=1
+
+# Disable GlobalProtect cookie cache globally (default is enabled)
+MS_SSO_NM_GP_SKIP_COOKIE_CACHE=1
 
 # Disable browser session cache globally
 MS_SSO_NM_DISABLE_BROWSER_SESSION_CACHE=1
