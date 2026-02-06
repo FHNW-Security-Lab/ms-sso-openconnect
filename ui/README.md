@@ -12,7 +12,7 @@ Cross-platform Qt6 GUI for MS SSO OpenConnect VPN client.
 ### Linux (AppImage + Debian)
 
 ```bash
-./scripts/build-linux.sh [version]
+../frontends/linux/build.sh [version] [appimage|deb|all]
 # Output: dist/MS-SSO-OpenConnect-UI-{version}-x86_64.AppImage
 #         dist/*.deb
 ```
@@ -20,9 +20,11 @@ Cross-platform Qt6 GUI for MS SSO OpenConnect VPN client.
 ### macOS (pkg)
 
 ```bash
-./scripts/build-macos.sh [version]
+../frontends/osx/build.sh [version]
 # Output: dist/MS-SSO-OpenConnect-{version}.pkg
 ```
+
+Legacy scripts are still available under `ui/scripts/`.
 
 ## Development
 

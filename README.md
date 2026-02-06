@@ -2,60 +2,40 @@
 
 A tool to connect to VPNs protected by Microsoft SSO authentication using OpenConnect. Available as a command-line tool, a cross-platform GUI application (Linux/macOS), and a GNOME NetworkManager plugin.
 
-## Installation Options
+## Build and Packaging
 
-### Option 1: Desktop GUI Application (Linux & macOS)
-
-A system tray application with a simple interface for managing VPN connections.
-
-#### Linux (AppImage - Recommended)
-```bash
-cd ui
-./scripts/build-linux.sh 2.0.0 appimage
-./dist/MS-SSO-OpenConnect-UI-2.0.0-x86_64.AppImage
-```
-
-#### Linux (Debian Package)
-```bash
-cd ui
-./scripts/build-linux.sh 2.0.0 deb
-sudo dpkg -i dist/ms-sso-openconnect-ui_*.deb
-```
-
-#### macOS
-```bash
-cd ui
-./scripts/build-macos.sh 2.0.0
-# Install the generated .pkg file
-```
-
-**Features:**
-- System tray icon with connection status
-- Quick connect/disconnect from tray menu
-- Multiple connection profiles
-- Desktop notifications
-- Automatic session cookie caching for fast reconnection
-- Passwordless operation via PolicyKit (Linux) or LaunchDaemon (macOS)
-
-### Option 2: GNOME NetworkManager Plugin
-
-Integrates with GNOME Settings, allowing you to manage MS SSO VPN connections like any other VPN.
+Use the unified build entrypoint:
 
 ```bash
-cd gnome-nm-plugin
-./build-deb.sh
-sudo dpkg -i dist/network-manager-ms-sso_*.deb
+./build/build.sh <target> [version-or-component]
 ```
 
-After installation:
-1. Open **Settings → Network → VPN**
-2. Click **+** to add a new VPN
-3. Select **MS SSO OpenConnect**
-4. Enter your VPN server and credentials
+Supported packaging targets:
 
-**Note:** This option is for GNOME desktop users who prefer native NetworkManager integration.
+- `pkg` (macOS package)
+- `deb` (Linux Qt frontend)
+- `appimage` (Linux Qt frontend)
+- `gnome-deb` (GNOME NetworkManager plugin)
+- `nix` (Nix package set: `core`, `ui`, `plugin`, `all`)
 
-### Option 3: NixOS (GNOME NetworkManager Plugin)
+Optional `make` shortcuts are provided:
+
+```bash
+make appimage VERSION=2.0.0
+make deb VERSION=2.0.0
+make pkg VERSION=2.0.0
+make gnome-deb
+make nix
+```
+
+Build outputs are collected under top-level `dist/`:
+
+- `dist/linux/appimage/`
+- `dist/linux/deb/`
+- `dist/osx/pkg/`
+- `dist/gnome-plugin/deb/`
+
+### NixOS (GNOME NetworkManager Plugin)
 
 Add this to `/etc/nixos/configuration.nix`:
 
@@ -83,7 +63,7 @@ Rebuild:
 sudo nixos-rebuild switch
 ```
 
-### Option 4: Command-Line Tool
+### Command-Line Tool
 
 For headless servers, scripting, or users who prefer the terminal.
 
@@ -143,29 +123,22 @@ chmod +x ms-sso-openconnect
 ## Architecture
 
 ```
-core/                    # Shared authentication & connection logic
-├── auth.py             # Microsoft SAML authentication via Playwright
-├── config.py           # Credential storage in system keyring
-├── connect.py          # OpenConnect subprocess management
-├── cookies.py          # Session cookie caching
-└── totp.py             # TOTP 2FA code generation
+codebase/                # Shared architecture docs and runtime contracts
+core/                    # Shared auth/connect logic used by all frontends
+ms-sso-openconnect.py    # CLI entry point
+ms-sso-openconnect       # CLI bootstrap wrapper
 
-ms-sso-openconnect.py   # CLI entry point
+frontends/
+├── linux/               # Linux Qt frontend build wrapper
+├── osx/                 # macOS Qt frontend build wrapper
+└── gnome-plugin/        # GNOME plugin build wrapper
 
-ui/                     # Cross-platform Qt6 GUI (Linux + macOS)
-├── src/vpn_ui/         # Application code
-│   ├── main.py         # Main application controller
-│   ├── tray.py         # System tray icon & menu
-│   ├── worker.py       # Async VPN operations (QThread)
-│   ├── backend/        # Backend abstraction
-│   └── platform/       # Platform-specific code
-├── macos/daemon/       # macOS LaunchDaemon for root operations
-└── scripts/            # Build scripts
+build/                   # Unified build entrypoints
+└── build.sh             # Main dispatcher for pkg/deb/appimage/nix
 
-gnome-nm-plugin/        # GNOME NetworkManager integration
-├── src/                # D-Bus service & GTK4 editor
-├── data/               # D-Bus configuration files
-└── packaging/          # Debian packaging
+ui/                      # Qt frontend implementation (Linux + macOS)
+gnome-nm-plugin/         # GNOME NetworkManager plugin implementation
+nix/                     # Nix/NixOS packaging support
 ```
 
 ## How It Works

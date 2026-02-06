@@ -58,6 +58,12 @@ This installs Chromium to `/root/.cache/ms-playwright/`.
 ## Building
 
 ```bash
+./frontends/gnome-plugin/build.sh
+```
+
+Legacy script is still available:
+
+```bash
 cd gnome-nm-plugin
 ./build-deb.sh
 ```
