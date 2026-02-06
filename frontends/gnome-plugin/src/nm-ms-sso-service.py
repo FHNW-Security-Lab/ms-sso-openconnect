@@ -150,6 +150,7 @@ class VPNPluginService(dbus.service.Object):
         self.gp_connect_start_time = None
         self.auth_in_progress = False
         self.saml_start_time = None
+        self._auth_started_guard_triggered = False
         # Cancel flag (e.g. NM timeout/user disconnect) so we don't continue
         # long-running auth and connect behind NetworkManager's back.
         self.cancel_requested = False
@@ -385,6 +386,7 @@ class VPNPluginService(dbus.service.Object):
                     log.info("Performing SAML authentication...")
                     self.auth_in_progress = True
                     self.saml_start_time = time.monotonic()
+                    self._auth_started_guard_triggered = False
 
                     # Keep NetworkManager from timing out while SAML is in progress by
                     # periodically emitting an initial Config. (GP MFA can take >60s.)
@@ -397,7 +399,7 @@ class VPNPluginService(dbus.service.Object):
                             if protocol != 'gp' or self._gp_initial_config_allowed():
                                 GLib.idle_add(self._emit_initial_config)
                             # Keep NetworkManager from thinking the connection stalled.
-                            if protocol == 'gp' and os.environ.get("MS_SSO_NM_GP_EARLY_STARTED", "").lower() in {"1", "true", "yes"}:
+                            if self._should_emit_started_keepalive(protocol):
                                 GLib.idle_add(self._emit_started_keepalive)
                             else:
                                 GLib.idle_add(self._emit_starting_keepalive)
@@ -460,6 +462,7 @@ class VPNPluginService(dbus.service.Object):
                     finally:
                         self.auth_in_progress = False
                         self.saml_start_time = None
+                        self._auth_started_guard_triggered = False
                         stop_keepalive.set()
 
                     if not cookies:
@@ -749,6 +752,52 @@ class VPNPluginService(dbus.service.Object):
                 f"(elapsed {elapsed:.0f}s < {delay_seconds}s)"
             )
             return False
+        return True
+
+    def _get_auth_started_guard_seconds(self, protocol: str) -> int:
+        """Return seconds after which we emit STARTED keepalive during slow auth."""
+        env_candidates = []
+        if protocol == 'gp':
+            env_candidates.append("MS_SSO_NM_GP_AUTH_TIMEOUT_GUARD_SEC")
+        env_candidates.append("MS_SSO_NM_AUTH_TIMEOUT_GUARD_SEC")
+
+        for env_name in env_candidates:
+            value = os.environ.get(env_name, "").strip()
+            if not value:
+                continue
+            try:
+                parsed = int(value)
+                if parsed >= 0:
+                    return parsed
+            except Exception:
+                log.warning(f"Ignoring invalid {env_name} value: {value!r}")
+
+        return 45
+
+    def _should_emit_started_keepalive(self, protocol: str) -> bool:
+        """Return True when we should send STARTED keepalive to avoid NM timeout."""
+        if protocol == 'gp' and os.environ.get("MS_SSO_NM_GP_EARLY_STARTED", "").lower() in {"1", "true", "yes"}:
+            return True
+
+        if not getattr(self, "auth_in_progress", False):
+            return False
+        if not getattr(self, "saml_start_time", None):
+            return False
+
+        guard_seconds = self._get_auth_started_guard_seconds(protocol)
+        if guard_seconds <= 0:
+            return False
+
+        elapsed = time.monotonic() - self.saml_start_time
+        if elapsed < guard_seconds:
+            return False
+
+        if not self._auth_started_guard_triggered:
+            self._auth_started_guard_triggered = True
+            log.info(
+                f"Auth timeout guard active after {elapsed:.0f}s (threshold {guard_seconds}s): "
+                "emitting STARTED keepalive to avoid NetworkManager connect timeout"
+            )
         return True
 
     def _clear_onlink_host_route(self, gateway_ip: str) -> None:
