@@ -219,6 +219,7 @@ class VPNPluginService(dbus.service.Object):
         secrets['protocol'] = vpn_data.get('protocol', 'anyconnect')
         secrets['username'] = vpn_data.get('username', '')
         secrets['disable_cookie_cache'] = vpn_data.get('disable-cookie-cache', '')
+        secrets['disable_browser_session_cache'] = vpn_data.get('disable-browser-session-cache', '')
 
         # Extract secrets
         secrets['password'] = vpn_secrets.get('password', '')
@@ -296,6 +297,10 @@ class VPNPluginService(dbus.service.Object):
             disable_cookie_cache = (
                 self._is_truthy(secrets.get('disable_cookie_cache'))
                 or self._is_truthy(os.environ.get("MS_SSO_NM_DISABLE_COOKIE_CACHE"))
+            )
+            disable_browser_session_cache = (
+                self._is_truthy(secrets.get('disable_browser_session_cache'))
+                or self._is_truthy(os.environ.get("MS_SSO_NM_DISABLE_BROWSER_SESSION_CACHE"))
             )
 
             if not gateway:
@@ -459,7 +464,8 @@ class VPNPluginService(dbus.service.Object):
                             auto_totp=True,
                             headless=True,
                             debug=True,  # Enable debug to see screenshots
-                            protocol=protocol  # Pass protocol for correct SAML URL
+                            protocol=protocol,  # Pass protocol for correct SAML URL
+                            disable_browser_session_cache=disable_browser_session_cache,
                         )
                         log.info(f"SAML auth returned cookies: {list(cookies.keys()) if cookies else 'none'}")
                         # Debug: write fresh cookies to file for comparison

@@ -6,7 +6,9 @@ import base64
 import json
 import os
 import re
+import shutil
 import ssl
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -130,6 +132,7 @@ def do_saml_auth(
     headless: bool = True,
     debug: bool = False,
     vpn_server_ip: Optional[str] = None,
+    disable_browser_session_cache: bool = False,
 ):
     """Complete Microsoft SAML authentication and return cookies."""
     vpn_server_raw = vpn_server
@@ -155,6 +158,19 @@ def do_saml_auth(
 
     real_user = os.environ.get("SUDO_USER", os.environ.get("USER", "root"))
     home = os.path.expanduser("~")
+
+    def _is_truthy(value) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    force_ephemeral_browser_session = (
+        _is_truthy(disable_browser_session_cache)
+        or _is_truthy(os.environ.get("MS_SSO_DISABLE_BROWSER_SESSION_CACHE"))
+    )
+
     if real_user == "root":
         detected_user = _detect_desktop_user()
         if detected_user:
@@ -175,7 +191,13 @@ def do_saml_auth(
                 break
 
     with sync_playwright() as p:
-        if real_user != "root":
+        session_tmp_dir = None
+        if force_ephemeral_browser_session:
+            session_tmp_dir = tempfile.mkdtemp(prefix="ms-sso-openconnect-auth-")
+            cache_dir = session_tmp_dir
+            if debug:
+                print(f"    [DEBUG] Using ephemeral browser session dir: {cache_dir}")
+        elif real_user != "root":
             cache_dir = os.path.join(home, ".cache", "ms-sso-openconnect", "browser-session")
         else:
             cache_dir = None
@@ -202,6 +224,13 @@ def do_saml_auth(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         )
         page = context.pages[0] if context.pages else context.new_page()
+
+        def _close_context() -> None:
+            try:
+                context.close()
+            finally:
+                if session_tmp_dir:
+                    shutil.rmtree(session_tmp_dir, ignore_errors=True)
 
         saml_result = {
             "prelogin_cookie": None,
@@ -595,7 +624,7 @@ def do_saml_auth(
                         session_cookies["prelogin-cookie"] = saml_result["prelogin_cookie"]
                     if gp_prelogin_cookie and "prelogin-cookie" not in session_cookies:
                         session_cookies["prelogin-cookie"] = gp_prelogin_cookie
-                    context.close()
+                    _close_context()
                     return session_cookies
 
             filled_username = False
@@ -829,7 +858,7 @@ def do_saml_auth(
                 except Exception:
                     pass
 
-            context.close()
+            _close_context()
             return vpn_cookies
         except Exception as e:
             if debug:
@@ -837,5 +866,5 @@ def do_saml_auth(
                     page.screenshot(path="/tmp/vpn-auth-error.png")
                 except Exception:
                     pass
-            context.close()
+            _close_context()
             raise e
