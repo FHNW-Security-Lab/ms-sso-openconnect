@@ -218,6 +218,7 @@ class VPNPluginService(dbus.service.Object):
         secrets['gateway'] = vpn_data.get('gateway', '')
         secrets['protocol'] = vpn_data.get('protocol', 'anyconnect')
         secrets['username'] = vpn_data.get('username', '')
+        secrets['disable_cookie_cache'] = vpn_data.get('disable-cookie-cache', '')
 
         # Extract secrets
         secrets['password'] = vpn_secrets.get('password', '')
@@ -271,6 +272,14 @@ class VPNPluginService(dbus.service.Object):
 
         return secrets
 
+    def _is_truthy(self, value) -> bool:
+        """Return True for common truthy config values."""
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
     def _connect_thread(self, settings):
         """Worker thread for VPN connection."""
         try:
@@ -284,6 +293,10 @@ class VPNPluginService(dbus.service.Object):
             username = secrets['username']
             password = secrets['password']
             totp_secret = secrets['totp_secret']
+            disable_cookie_cache = (
+                self._is_truthy(secrets.get('disable_cookie_cache'))
+                or self._is_truthy(os.environ.get("MS_SSO_NM_DISABLE_COOKIE_CACHE"))
+            )
 
             if not gateway:
                 raise Exception("No gateway specified")
@@ -363,6 +376,8 @@ class VPNPluginService(dbus.service.Object):
 
                 if attempt == 0 and protocol == 'gp':
                     log.info("GlobalProtect: skipping cookie cache (short TTL)")
+                elif attempt == 0 and disable_cookie_cache:
+                    log.info("Cookie cache disabled; forcing fresh authentication")
                 elif attempt == 0:
                     log.debug("Checking for cached cookies...")
                     cached = get_nm_stored_cookies(connection_name, max_age_hours=12)
