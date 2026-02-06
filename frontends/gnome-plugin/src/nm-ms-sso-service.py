@@ -220,6 +220,7 @@ class VPNPluginService(dbus.service.Object):
         secrets['username'] = vpn_data.get('username', '')
         secrets['disable_cookie_cache'] = vpn_data.get('disable-cookie-cache', '')
         secrets['disable_browser_session_cache'] = vpn_data.get('disable-browser-session-cache', '')
+        secrets['enable_browser_session_cache'] = vpn_data.get('enable-browser-session-cache', '')
 
         # Extract secrets
         secrets['password'] = vpn_secrets.get('password', '')
@@ -281,6 +282,25 @@ class VPNPluginService(dbus.service.Object):
             return False
         return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
+    def _parse_bool(self, value):
+        """Parse bool-like values; return True/False or None when unset/unknown."""
+        if value is None:
+            return None
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return None
+
+    def _gp_early_started_enabled(self) -> bool:
+        """Whether GP should optimistically report STARTED during auth."""
+        value = self._parse_bool(os.environ.get("MS_SSO_NM_GP_EARLY_STARTED"))
+        if value is None:
+            # Default on: avoids NM connect-timeout for long GP SAML/MFA flows.
+            return True
+        return value
+
     def _connect_thread(self, settings):
         """Worker thread for VPN connection."""
         try:
@@ -298,9 +318,23 @@ class VPNPluginService(dbus.service.Object):
                 self._is_truthy(secrets.get('disable_cookie_cache'))
                 or self._is_truthy(os.environ.get("MS_SSO_NM_DISABLE_COOKIE_CACHE"))
             )
+            force_enable_browser_session_cache = (
+                self._is_truthy(secrets.get('enable_browser_session_cache'))
+                or self._is_truthy(os.environ.get("MS_SSO_NM_ENABLE_BROWSER_SESSION_CACHE"))
+                or (
+                    protocol == 'gp'
+                    and self._is_truthy(os.environ.get("MS_SSO_NM_GP_ENABLE_BROWSER_SESSION_CACHE"))
+                )
+            )
             disable_browser_session_cache = (
                 self._is_truthy(secrets.get('disable_browser_session_cache'))
                 or self._is_truthy(os.environ.get("MS_SSO_NM_DISABLE_BROWSER_SESSION_CACHE"))
+            )
+            if force_enable_browser_session_cache:
+                disable_browser_session_cache = False
+            log.info(
+                "Browser session cache: "
+                f"{'disabled' if disable_browser_session_cache else 'enabled'}"
             )
 
             if not gateway:
@@ -355,11 +389,10 @@ class VPNPluginService(dbus.service.Object):
                 GLib.idle_add(self._emit_initial_config)
             # NetworkManager expects the plugin to reach STARTED in a timely manner or it
             # may cancel the connection (observed ~60s). GlobalProtect SAML/MFA flows can
-            # easily exceed that. By default we keep STARTING so the UI shows "Connecting"
-            # until the tunnel is actually up. Set MS_SSO_NM_GP_EARLY_STARTED=1 to
-            # preserve the legacy behavior (optimistically marking STARTED during auth).
+            # easily exceed that, so GP defaults to optimistic STARTED during auth.
+            # Set MS_SSO_NM_GP_EARLY_STARTED=0 to keep "Connecting" until tunnel up.
             if protocol == 'gp':
-                if os.environ.get("MS_SSO_NM_GP_EARLY_STARTED", "").lower() in {"1", "true", "yes"}:
+                if self._gp_early_started_enabled():
                     GLib.idle_add(self._emit_started_for_auth)
 
             # Connection name for cookie cache
@@ -797,7 +830,7 @@ class VPNPluginService(dbus.service.Object):
 
     def _should_emit_started_keepalive(self, protocol: str) -> bool:
         """Return True when we should send STARTED keepalive to avoid NM timeout."""
-        if protocol == 'gp' and os.environ.get("MS_SSO_NM_GP_EARLY_STARTED", "").lower() in {"1", "true", "yes"}:
+        if protocol == 'gp' and self._gp_early_started_enabled():
             return True
 
         if not getattr(self, "auth_in_progress", False):

@@ -178,6 +178,17 @@ nix/                     # Nix/NixOS packaging support
 - CLI: `~/.cache/ms-sso-openconnect/`
 - Cookies expire after 12 hours or when rejected by server
 
+For GNOME NetworkManager plugin connections, caching can be controlled per
+connection with `vpn.data` keys:
+
+```bash
+nmcli connection modify <name> +vpn.data disable-cookie-cache=yes
+nmcli connection modify <name> +vpn.data disable-browser-session-cache=yes
+nmcli connection modify <name> +vpn.data enable-browser-session-cache=yes
+```
+
+See `frontends/gnome-plugin/README.plugin.md` for full cache and timeout controls.
+
 ## CLI Usage
 
 ### Initial Setup

@@ -109,6 +109,70 @@ After installation:
 5. Click **Add**
 6. Toggle the VPN switch to connect
 
+## Cache Controls
+
+The GNOME plugin has two independent caches:
+
+1. **VPN session cookie cache** (fast reconnect using VPN cookies)
+2. **Browser session cache** (Playwright profile to reuse Microsoft login state)
+
+### Per-connection toggles (`nmcli`)
+
+```bash
+# Disable VPN cookie cache for one connection
+nmcli connection modify FHNW +vpn.data disable-cookie-cache=yes
+
+# Disable browser session reuse for one connection
+nmcli connection modify FHNW +vpn.data disable-browser-session-cache=yes
+
+# Force-enable browser session reuse for one connection
+nmcli connection modify Unibas +vpn.data enable-browser-session-cache=yes
+```
+
+To revert to default behavior, remove the keys:
+
+```bash
+nmcli connection modify FHNW -vpn.data disable-cookie-cache
+nmcli connection modify FHNW -vpn.data disable-browser-session-cache
+nmcli connection modify Unibas -vpn.data enable-browser-session-cache
+```
+
+### Environment toggles (system-wide plugin process)
+
+```bash
+# Disable VPN cookie cache globally
+MS_SSO_NM_DISABLE_COOKIE_CACHE=1
+
+# Disable browser session cache globally
+MS_SSO_NM_DISABLE_BROWSER_SESSION_CACHE=1
+
+# Force-enable browser session cache globally
+MS_SSO_NM_ENABLE_BROWSER_SESSION_CACHE=1
+
+# Force-enable browser session cache only for GlobalProtect
+MS_SSO_NM_GP_ENABLE_BROWSER_SESSION_CACHE=1
+```
+
+## GlobalProtect Timeout Handling
+
+NetworkManager can cancel slow VPN setups after about 60 seconds.  
+GlobalProtect SAML/MFA often exceeds that, so the plugin now defaults to
+optimistic `STARTED` state during GP authentication to avoid timeout.
+
+Controls:
+
+```bash
+# Default behavior (if unset): enabled for GP
+MS_SSO_NM_GP_EARLY_STARTED=1
+
+# Keep GNOME UI in "Connecting" until tunnel is really up
+MS_SSO_NM_GP_EARLY_STARTED=0
+
+# Optional guard thresholds for keepalive behavior
+MS_SSO_NM_AUTH_TIMEOUT_GUARD_SEC=45
+MS_SSO_NM_GP_AUTH_TIMEOUT_GUARD_SEC=45
+```
+
 ## Architecture
 
 ```
