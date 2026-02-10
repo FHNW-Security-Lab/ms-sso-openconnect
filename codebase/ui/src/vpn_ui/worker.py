@@ -1,5 +1,7 @@
 """QThread workers for async VPN operations."""
 
+import os
+import time
 from typing import Optional, TYPE_CHECKING
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
@@ -59,75 +61,135 @@ class VPNConnectWorker(QObject):
 
             name, address, protocol, username, password, totp_secret = config
 
-            # Check for cached cookies first (unless no_cache is set)
-            cached_cookies = None
-            cached_usergroup = None
+            # Watchdog retries for both AnyConnect and GlobalProtect.
+            try:
+                max_connect_attempts = max(
+                    1,
+                    int(os.environ.get("MS_SSO_RECONNECT_MAX_ATTEMPTS", "3").strip() or "3"),
+                )
+            except Exception:
+                max_connect_attempts = 3
+            try:
+                reconnect_delay_seconds = max(
+                    0,
+                    int(os.environ.get("MS_SSO_RECONNECT_DELAY_SECONDS", "5").strip() or "5"),
+                )
+            except Exception:
+                reconnect_delay_seconds = 5
 
-            if not self.no_cache:
-                cached = self.backend.get_stored_cookies(name)
-                if cached:
-                    cached_cookies, cached_usergroup = cached
-                    self.progress.emit("Using cached session...")
-
-            cookies = None
-
-            if cached_cookies:
-                # Try connecting with cached cookies first
-                self.progress.emit(f"Reconnecting to {name} with cached credentials...")
-
-                # We need to run openconnect in a way that allows fallback
+            # Fresh auth retries: AnyConnect sometimes needs one extra first-pass auth.
+            fresh_auth_attempts = 1
+            anyconnect_retry_delay_seconds = 2
+            if protocol == "anyconnect":
                 try:
+                    fresh_auth_attempts = max(
+                        1,
+                        int(os.environ.get("MS_SSO_ANYCONNECT_FRESH_AUTH_ATTEMPTS", "2").strip() or "2"),
+                    )
+                except Exception:
+                    fresh_auth_attempts = 2
+                try:
+                    anyconnect_retry_delay_seconds = max(
+                        0,
+                        int(os.environ.get("MS_SSO_ANYCONNECT_RETRY_DELAY_SECONDS", "2").strip() or "2"),
+                    )
+                except Exception:
+                    anyconnect_retry_delay_seconds = 2
+
+            cached_checked = self.no_cache
+            auth_ok = False
+
+            for connect_attempt in range(max_connect_attempts):
+                if self._is_cancelled:
+                    self.finished.emit(False, "Cancelled")
+                    return
+
+                if connect_attempt > 0:
+                    self.progress.emit(
+                        f"Connection lost/failed. Watchdog retry {connect_attempt + 1}/{max_connect_attempts}..."
+                    )
+                    if reconnect_delay_seconds > 0:
+                        for _ in range(reconnect_delay_seconds * 2):
+                            if self._is_cancelled:
+                                self.finished.emit(False, "Cancelled")
+                                return
+                            time.sleep(0.5)
+
+                # Try cached cookies once on first attempt.
+                if not cached_checked:
+                    cached_checked = True
+                    cached = self.backend.get_stored_cookies(name)
+                    if cached:
+                        cached_cookies, cached_usergroup = cached
+                        self.progress.emit("Using cached session...")
+                        self.progress.emit(f"Reconnecting to {name} with cached credentials...")
+                        success = self._try_connect(
+                            address, protocol, cached_cookies, username,
+                            cached_usergroup, allow_fallback=True
+                        )
+                        if success:
+                            self.finished.emit(True, f"Connected to {name}")
+                            return
+                        self.backend.clear_stored_cookies(name)
+
+                # Fresh auth + connect cycle.
+                for auth_attempt in range(fresh_auth_attempts):
+                    if self._is_cancelled:
+                        self.finished.emit(False, "Cancelled")
+                        return
+
+                    if auth_attempt == 0:
+                        self.progress.emit(f"Authenticating to {name}...")
+                    else:
+                        self.progress.emit(
+                            f"Retrying authentication ({auth_attempt + 1}/{fresh_auth_attempts})..."
+                        )
+                        if anyconnect_retry_delay_seconds > 0:
+                            for _ in range(anyconnect_retry_delay_seconds * 2):
+                                if self._is_cancelled:
+                                    self.finished.emit(False, "Cancelled")
+                                    return
+                                time.sleep(0.5)
+
+                    cookies = self.backend.do_saml_auth(
+                        vpn_server=address,
+                        username=username,
+                        password=password,
+                        totp_secret=totp_secret,
+                        protocol=protocol,
+                        headless=not self.visible,
+                        debug=self.debug
+                    )
+
+                    if not cookies:
+                        continue
+                    auth_ok = True
+
+                    if self._is_cancelled:
+                        self.finished.emit(False, "Cancelled")
+                        return
+
+                    # Store the cookies with initial usergroup for prelogin-cookie
+                    self.backend.store_cookies(name, cookies, usergroup='portal:prelogin-cookie')
+
+                    # Connect
+                    self.progress.emit(f"Connecting to {address}...")
                     success = self._try_connect(
-                        address, protocol, cached_cookies, username,
-                        cached_usergroup, allow_fallback=True
+                        address, protocol, cookies, username,
+                        connection_name=name, allow_fallback=False
                     )
                     if success:
                         self.finished.emit(True, f"Connected to {name}")
                         return
-                except Exception as e:
-                    self.progress.emit(f"Cached session expired, re-authenticating...")
 
-            # Need to authenticate
-            if self._is_cancelled:
-                self.finished.emit(False, "Cancelled")
-                return
+                    # Don't keep a fresh cookie cache when the immediate connect fails.
+                    self.backend.clear_stored_cookies(name)
 
-            self.progress.emit(f"Authenticating to {name}...")
-
-            cookies = self.backend.do_saml_auth(
-                vpn_server=address,
-                username=username,
-                password=password,
-                totp_secret=totp_secret,
-                protocol=protocol,
-                headless=not self.visible,
-                debug=self.debug
-            )
-
-            if not cookies:
-                self.error.emit("Authentication failed")
-                self.finished.emit(False, "Authentication failed")
-                return
-
-            if self._is_cancelled:
-                self.finished.emit(False, "Cancelled")
-                return
-
-            # Store the cookies with initial usergroup for prelogin-cookie
-            self.backend.store_cookies(name, cookies, usergroup='portal:prelogin-cookie')
-
-            # Connect
-            self.progress.emit(f"Connecting to {address}...")
-
-            success = self._try_connect(
-                address, protocol, cookies, username,
-                connection_name=name, allow_fallback=False
-            )
-
-            if success:
-                self.finished.emit(True, f"Connected to {name}")
+            if auth_ok:
+                self.finished.emit(False, f"Failed to connect to {name} after {max_connect_attempts} attempts")
             else:
-                self.finished.emit(False, f"Failed to connect to {name}")
+                self.error.emit("Authentication failed")
+                self.finished.emit(False, "Authentication failed after retries")
 
         except Exception as e:
             self.error.emit(str(e))

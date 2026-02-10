@@ -225,6 +225,7 @@ class VPNPluginService(dbus.service.Object):
         secrets['auto_reconnect'] = vpn_data.get('auto-reconnect', '')
         secrets['reconnect_delay_seconds'] = vpn_data.get('reconnect-delay-seconds', '')
         secrets['reconnect_max_delay_seconds'] = vpn_data.get('reconnect-max-delay-seconds', '')
+        secrets['reconnect_max_attempts'] = vpn_data.get('reconnect-max-attempts', '')
 
         # Extract secrets
         secrets['password'] = vpn_secrets.get('password', '')
@@ -462,19 +463,44 @@ class VPNPluginService(dbus.service.Object):
                     self._parse_positive_int(os.environ.get("MS_SSO_NM_RECONNECT_MAX_DELAY_SECONDS"), 60),
                 ),
             )
+            reconnect_max_attempts = self._parse_positive_int(
+                secrets.get('reconnect_max_attempts'),
+                self._parse_positive_int(
+                    os.environ.get("MS_SSO_NM_GP_RECONNECT_MAX_ATTEMPTS") if protocol == 'gp' else None,
+                    self._parse_positive_int(os.environ.get("MS_SSO_NM_RECONNECT_MAX_ATTEMPTS"), 5),
+                ),
+            )
+            reconnect_limit_label = "inf" if reconnect_max_attempts == 0 else str(reconnect_max_attempts)
             reconnect_reset_seconds = self._parse_positive_int(os.environ.get("MS_SSO_NM_RECONNECT_RESET_SECONDS"), 120)
             watchdog_interval_seconds = self._parse_positive_int(os.environ.get("MS_SSO_NM_WATCHDOG_INTERVAL_SECONDS"), 5)
             watchdog_missing_tun_limit = self._parse_positive_int(os.environ.get("MS_SSO_NM_WATCHDOG_TUN_MISS_LIMIT"), 3)
+            anyconnect_fresh_retries = 0
+            anyconnect_retry_delay_seconds = 0
+            if protocol == 'anyconnect':
+                anyconnect_fresh_retries = self._parse_positive_int(
+                    os.environ.get("MS_SSO_NM_ANYCONNECT_FRESH_RETRIES"),
+                    1,
+                )
+                anyconnect_retry_delay_seconds = self._parse_positive_int(
+                    os.environ.get("MS_SSO_NM_ANYCONNECT_RETRY_DELAY_SECONDS"),
+                    2,
+                )
             log.info(
                 "Auto-reconnect: "
                 f"{'enabled' if auto_reconnect else 'disabled'}, "
-                f"delay={reconnect_delay_seconds}s, max-delay={reconnect_max_delay_seconds}s"
+                f"delay={reconnect_delay_seconds}s, max-delay={reconnect_max_delay_seconds}s, "
+                f"max-attempts={reconnect_limit_label}"
             )
+            if protocol == 'anyconnect':
+                log.info(
+                    "AnyConnect fresh-auth retries: "
+                    f"{anyconnect_fresh_retries} (delay={anyconnect_retry_delay_seconds}s)"
+                )
 
             reconnect_attempt = 0
             while not self.cancel_requested:
                 # Try connection with retry on cookie rejection.
-                max_attempts = 2
+                max_attempts = 2 + anyconnect_fresh_retries
                 connection_ended = False
                 connection_uptime_seconds = 0
                 final_error = None
@@ -629,7 +655,25 @@ class VPNPluginService(dbus.service.Object):
                         log.warning("Cookie rejected, clearing cache and re-authenticating...")
                         clear_nm_cookies(connection_name)
                         continue
+                    elif (
+                        protocol == 'anyconnect'
+                        and not used_cache
+                        and attempt < max_attempts - 1
+                    ):
+                        # First-time AnyConnect auth can be flaky on some deployments.
+                        # Retry fresh auth once (or configured times) before failing.
+                        log.warning(
+                            "AnyConnect fresh-auth connect attempt failed; "
+                            "clearing cached fresh cookie and retrying authentication..."
+                        )
+                        clear_nm_cookies(connection_name)
+                        if anyconnect_retry_delay_seconds > 0:
+                            if not self._interruptible_sleep(anyconnect_retry_delay_seconds):
+                                return
+                        continue
                     else:
+                        if not used_cache:
+                            clear_nm_cookies(connection_name)
                         final_error = error_msg or "VPN connection failed"
                         break
 
@@ -637,7 +681,34 @@ class VPNPluginService(dbus.service.Object):
                     return
 
                 if not connection_ended:
-                    raise Exception(final_error or "VPN connection failed")
+                    reconnect_attempt += 1
+                    if not auto_reconnect:
+                        raise Exception(final_error or "VPN connection failed")
+                    if reconnect_max_attempts > 0 and reconnect_attempt > reconnect_max_attempts:
+                        raise Exception(
+                            (final_error or "VPN connection failed")
+                            + f" (watchdog retry limit reached: {reconnect_max_attempts})"
+                        )
+
+                    self._cleanup_dns()
+                    backoff_step = min(max(reconnect_attempt - 1, 0), 6)
+                    delay_seconds = min(
+                        reconnect_delay_seconds * (2 ** backoff_step),
+                        reconnect_max_delay_seconds,
+                    ) if reconnect_max_delay_seconds > 0 else reconnect_delay_seconds
+                    log.warning(
+                        "Watchdog: VPN connection failed; "
+                        f"retrying in {delay_seconds}s (attempt {reconnect_attempt}/{reconnect_limit_label})"
+                    )
+                    if protocol == 'gp' and self._gp_early_started_enabled():
+                        GLib.idle_add(self._emit_started_keepalive)
+                    else:
+                        GLib.idle_add(self._emit_starting_keepalive)
+                    if protocol != 'gp' or self._gp_initial_config_allowed():
+                        GLib.idle_add(self._emit_initial_config)
+                    if not self._interruptible_sleep(delay_seconds):
+                        return
+                    continue
 
                 # Connection was up and then ended (e.g., network loss/session timeout).
                 if connection_uptime_seconds >= reconnect_reset_seconds:
@@ -648,6 +719,11 @@ class VPNPluginService(dbus.service.Object):
                 if not auto_reconnect:
                     GLib.idle_add(self._emit_disconnected)
                     return
+                if reconnect_max_attempts > 0 and reconnect_attempt > reconnect_max_attempts:
+                    raise Exception(
+                        "VPN tunnel ended unexpectedly and watchdog retry limit was reached "
+                        f"({reconnect_max_attempts})"
+                    )
 
                 self._cleanup_dns()
                 backoff_step = min(max(reconnect_attempt - 1, 0), 6)
@@ -658,7 +734,7 @@ class VPNPluginService(dbus.service.Object):
                 log.warning(
                     "Watchdog: VPN tunnel ended unexpectedly "
                     f"(uptime={connection_uptime_seconds}s); reconnecting in {delay_seconds}s "
-                    f"(attempt {reconnect_attempt})"
+                    f"(attempt {reconnect_attempt}/{reconnect_limit_label})"
                 )
                 if protocol == 'gp' and self._gp_early_started_enabled():
                     GLib.idle_add(self._emit_started_keepalive)
