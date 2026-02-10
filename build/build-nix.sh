@@ -7,8 +7,8 @@ TARGET="${1:-all}"
 
 build_one() {
     local attr="$1"
-    echo "Building nix attribute: $attr"
-    nix-build "$REPO_ROOT/nix/default.nix" -A "$attr"
+    echo "Building nix package: $attr"
+    nix build "$REPO_ROOT#$attr"
 }
 
 case "$TARGET" in
