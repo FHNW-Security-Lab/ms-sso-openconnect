@@ -180,6 +180,7 @@ MS_SSO_NM_GP_EARLY_STARTED=0
 # Optional guard thresholds for keepalive behavior
 MS_SSO_NM_AUTH_TIMEOUT_GUARD_SEC=45
 MS_SSO_NM_GP_AUTH_TIMEOUT_GUARD_SEC=45
+MS_SSO_NM_ANYCONNECT_AUTH_TIMEOUT_GUARD_SEC=30
 
 # Delay before GP initial Config emission (default: 20 seconds)
 MS_SSO_NM_GP_CONFIG_DELAY=20
@@ -187,6 +188,18 @@ MS_SSO_NM_GP_CONFIG_DELAY=20
 # Keepalive cadence during long authentication (default: 10 seconds)
 MS_SSO_NM_AUTH_KEEPALIVE_SECONDS=10
 MS_SSO_NM_GP_AUTH_KEEPALIVE_SECONDS=10
+
+# Tunnel bring-up timeouts
+MS_SSO_NM_TUNNEL_TIMEOUT_SECONDS=30
+MS_SSO_NM_GP_TUNNEL_TIMEOUT_SECONDS=30
+MS_SSO_NM_ANYCONNECT_TUNNEL_TIMEOUT_SECONDS=45
+
+# AnyConnect: if another worker is already authenticating, wait for its
+# fresh cookie result instead of starting a second browser auth flow.
+MS_SSO_NM_ANYCONNECT_WAIT_AUTH_SECONDS=90
+
+# Optional sensitive debug dumps (off by default)
+MS_SSO_NM_DEBUG_DUMP_COOKIES=1
 ```
 
 ## Watchdog and Auto-Reconnect

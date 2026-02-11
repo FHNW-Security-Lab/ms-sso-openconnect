@@ -312,6 +312,55 @@ class VPNPluginService(dbus.service.Object):
             return True
         return value
 
+    def _get_tunnel_connect_timeout_seconds(self, protocol: str) -> int:
+        """Return tunnel bring-up timeout (seconds) for protocol."""
+        env_candidates = []
+        if protocol == 'gp':
+            env_candidates.append("MS_SSO_NM_GP_TUNNEL_TIMEOUT_SECONDS")
+        if protocol == 'anyconnect':
+            env_candidates.append("MS_SSO_NM_ANYCONNECT_TUNNEL_TIMEOUT_SECONDS")
+        env_candidates.append("MS_SSO_NM_TUNNEL_TIMEOUT_SECONDS")
+
+        for env_name in env_candidates:
+            value = os.environ.get(env_name, "").strip()
+            if not value:
+                continue
+            try:
+                parsed = int(value)
+                if parsed > 0:
+                    return parsed
+            except Exception:
+                log.warning(f"Ignoring invalid {env_name} value: {value!r}")
+
+        if protocol == 'anyconnect':
+            return 45
+        return 30
+
+    def _list_tun_devices(self):
+        """Return current tun* interface names."""
+        tun_devs = set()
+        try:
+            links = subprocess.run(
+                ["ip", "-o", "link", "show"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            for line in links.stdout.splitlines():
+                if ":" not in line:
+                    continue
+                parts = line.split(":", 2)
+                if len(parts) < 2:
+                    continue
+                dev = parts[1].strip()
+                if "@" in dev:
+                    dev = dev.split("@", 1)[0]
+                if dev.startswith("tun"):
+                    tun_devs.add(dev)
+        except Exception:
+            pass
+        return tun_devs
+
     def _parse_positive_int(self, value, default: int) -> int:
         """Parse non-negative integer config values."""
         if value is None:
@@ -493,9 +542,14 @@ class VPNPluginService(dbus.service.Object):
             reconnect_reset_seconds = self._parse_positive_int(os.environ.get("MS_SSO_NM_RECONNECT_RESET_SECONDS"), 120)
             watchdog_interval_seconds = self._parse_positive_int(os.environ.get("MS_SSO_NM_WATCHDOG_INTERVAL_SECONDS"), 5)
             watchdog_missing_tun_limit = self._parse_positive_int(os.environ.get("MS_SSO_NM_WATCHDOG_TUN_MISS_LIMIT"), 3)
+            anyconnect_wait_existing_auth_seconds = 0
             anyconnect_fresh_retries = 0
             anyconnect_retry_delay_seconds = 0
             if protocol == 'anyconnect':
+                anyconnect_wait_existing_auth_seconds = self._parse_positive_int(
+                    os.environ.get("MS_SSO_NM_ANYCONNECT_WAIT_AUTH_SECONDS"),
+                    90,
+                )
                 anyconnect_fresh_retries = self._parse_positive_int(
                     os.environ.get("MS_SSO_NM_ANYCONNECT_FRESH_RETRIES"),
                     1,
@@ -514,6 +568,10 @@ class VPNPluginService(dbus.service.Object):
                 log.info(
                     "AnyConnect fresh-auth retries: "
                     f"{anyconnect_fresh_retries} (delay={anyconnect_retry_delay_seconds}s)"
+                )
+                log.info(
+                    "AnyConnect wait-for-existing-auth window: "
+                    f"{anyconnect_wait_existing_auth_seconds}s"
                 )
 
             reconnect_attempt = 0
@@ -554,17 +612,44 @@ class VPNPluginService(dbus.service.Object):
                             cookies, usergroup = cached
                             used_cache = True
                             log.info(f"Using cached cookies (keys: {list(cookies.keys()) if cookies else 'none'})")
-                            # Debug: write cached cookies to file for comparison
-                            try:
-                                with open('/tmp/nm-vpn-cached-cookies.json', 'w') as f:
-                                    json.dump({"source": "cache", "cookies": cookies, "usergroup": usergroup}, f, indent=2)
-                                log.debug(f"Cached cookies written to /tmp/nm-vpn-cached-cookies.json")
-                            except Exception as e:
-                                log.debug(f"Could not write cached cookies debug file: {e}")
+                            # Optional sensitive debug dump; disabled by default.
+                            if self._is_truthy(os.environ.get("MS_SSO_NM_DEBUG_DUMP_COOKIES")):
+                                try:
+                                    with open('/tmp/nm-vpn-cached-cookies.json', 'w') as f:
+                                        json.dump({"source": "cache", "cookies": cookies, "usergroup": usergroup}, f, indent=2)
+                                    log.debug("Cached cookies written to /tmp/nm-vpn-cached-cookies.json")
+                                except Exception as e:
+                                    log.debug(f"Could not write cached cookies debug file: {e}")
                         else:
                             log.info("No valid cached cookies found")
 
                     # If no cached cookies or this is a retry, authenticate
+                    if not cookies:
+                        if (
+                            protocol == 'anyconnect'
+                            and anyconnect_wait_existing_auth_seconds > 0
+                            and self.auth_in_progress
+                        ):
+                            log.info(
+                                "AnyConnect authentication already in progress in another worker; "
+                                f"waiting up to {anyconnect_wait_existing_auth_seconds}s for reusable cookies"
+                            )
+                            wait_deadline = time.monotonic() + anyconnect_wait_existing_auth_seconds
+                            while time.monotonic() < wait_deadline:
+                                if _connect_cancelled():
+                                    log.info("Connect cancelled while waiting for existing authentication")
+                                    return
+                                cached = get_nm_stored_cookies(connection_name, max_age_hours=12)
+                                if cached:
+                                    cookies, usergroup = cached
+                                    used_cache = True
+                                    log.info("Reused cookies generated by concurrent AnyConnect authentication")
+                                    break
+                                if not self.auth_in_progress:
+                                    break
+                                if not self._interruptible_sleep(2, connect_generation):
+                                    return
+
                     if not cookies:
                         log.info("Performing SAML authentication...")
                         self.auth_in_progress = True
@@ -630,13 +715,14 @@ class VPNPluginService(dbus.service.Object):
                                 disable_browser_session_cache=disable_browser_session_cache,
                             )
                             log.info(f"SAML auth returned cookies: {list(cookies.keys()) if cookies else 'none'}")
-                            # Debug: write fresh cookies to file for comparison
-                            try:
-                                with open('/tmp/nm-vpn-fresh-cookies.json', 'w') as f:
-                                    json.dump({"source": "fresh_saml", "cookies": cookies}, f, indent=2)
-                                log.debug(f"Fresh cookies written to /tmp/nm-vpn-fresh-cookies.json")
-                            except Exception as e:
-                                log.debug(f"Could not write fresh cookies debug file: {e}")
+                            # Optional sensitive debug dump; disabled by default.
+                            if self._is_truthy(os.environ.get("MS_SSO_NM_DEBUG_DUMP_COOKIES")):
+                                try:
+                                    with open('/tmp/nm-vpn-fresh-cookies.json', 'w') as f:
+                                        json.dump({"source": "fresh_saml", "cookies": cookies}, f, indent=2)
+                                    log.debug("Fresh cookies written to /tmp/nm-vpn-fresh-cookies.json")
+                                except Exception as e:
+                                    log.debug(f"Could not write fresh cookies debug file: {e}")
                         except Exception as auth_err:
                             log.error(f"SAML auth error: {auth_err}")
                             import traceback
@@ -651,13 +737,15 @@ class VPNPluginService(dbus.service.Object):
                         if not cookies:
                             raise Exception("SAML authentication returned no cookies")
 
-                        if _connect_cancelled():
-                            log.info("Connect cancelled during authentication; aborting")
-                            return
-
                         # Store fresh cookies unless cache is explicitly disabled.
-                        if not disable_cookie_cache and not skip_gp_cookie_cache:
+                        # Store before cancellation check so NM-triggered reconnects can
+                        # reuse fresh auth result and skip duplicate browser auth flows.
+                        if not disable_cookie_cache and not skip_gp_cookie_cache and not used_cache:
                             store_nm_cookies(connection_name, cookies, usergroup='portal:prelogin-cookie')
+
+                        if _connect_cancelled():
+                            log.info("Connect cancelled during authentication; fresh cookies preserved for retry")
+                            return
 
                     # Try to connect with these cookies
                     if _connect_cancelled():
@@ -843,19 +931,20 @@ class VPNPluginService(dbus.service.Object):
                     f"--cookie={cookie_str}",
                     gateway,
                 ]
-                log.debug(f"OpenConnect command: {' '.join(cmd[:4])} [cookie] {gateway}")
-                # Also log the full command to a debug file for comparison
-                try:
-                    with open('/tmp/nm-vpn-debug-cmd.txt', 'w') as f:
-                        f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                        f.write(f"Command: {cmd}\n")
-                        f.write(f"Cookie string length: {len(cookie_str)}\n")
-                        f.write(f"Cookie keys: {list(cookies.keys())}\n")
-                        f.write(f"Cookie string: {cookie_str}\n")  # Full cookie for debugging
-                        f.write(f"\nManual test command:\n")
-                        f.write(f"sudo openconnect --verbose --protocol={proto_flag} --cookie='{cookie_str}' {gateway}\n")
-                except:
-                    pass
+                log.debug(
+                    "OpenConnect command: openconnect --verbose "
+                    f"--protocol={proto_flag} --cookie=[redacted] {gateway}"
+                )
+                # Optional sensitive debug dump; disabled by default.
+                if self._is_truthy(os.environ.get("MS_SSO_NM_DEBUG_DUMP_COOKIES")):
+                    try:
+                        with open('/tmp/nm-vpn-debug-cmd.txt', 'w') as f:
+                            f.write(f"Timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                            f.write(f"Cookie string length: {len(cookie_str)}\n")
+                            f.write(f"Cookie keys: {list(cookies.keys())}\n")
+                            f.write(f"Cookie string: {cookie_str}\n")
+                    except Exception:
+                        pass
                 self.vpn_process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -870,10 +959,13 @@ class VPNPluginService(dbus.service.Object):
 
             # Monitor for interface up and parse output for DNS
             # Wait for tun interface to come up
-            timeout = 30
+            timeout = self._get_tunnel_connect_timeout_seconds(protocol)
+            log.info(f"Waiting up to {timeout}s for tunnel interface")
             start_time = time.time()
             connected = False
             output_buffer = ""
+            openconnect_reported_up = False
+            baseline_tun_devs = self._list_tun_devices()
 
             # Set stdout to non-blocking so we can read while checking interface
             import fcntl
@@ -904,6 +996,7 @@ class VPNPluginService(dbus.service.Object):
                         output_buffer += text
                         # Parse for DNS servers (OpenConnect outputs: "Received DNS server X.X.X.X")
                         for line in text.split('\n'):
+                            line_lc = line.lower()
                             if 'DNS' in line.upper():
                                 log.info(f"OpenConnect DNS info: {line.strip()}")
                                 # Try to extract IP from various formats
@@ -914,25 +1007,39 @@ class VPNPluginService(dbus.service.Object):
                                         self.vpn_dns_servers.append(ip)
                                         log.info(f"Captured VPN DNS: {ip}")
                             # Also capture search domains
-                            if 'domain' in line.lower() or 'search' in line.lower():
+                            if 'domain' in line_lc or 'search' in line_lc:
                                 log.info(f"OpenConnect domain info: {line.strip()}")
+                            if (
+                                "connected as " in line_lc
+                                or "cstp connected" in line_lc
+                                or "esp session established" in line_lc
+                                or "dtls connected" in line_lc
+                                or "tun opened" in line_lc
+                            ):
+                                if not openconnect_reported_up:
+                                    openconnect_reported_up = True
+                                    log.info("OpenConnect reported tunnel session up")
                 except (BlockingIOError, IOError):
                     pass  # No data available yet
 
-                # Check for tun interface
-                result = subprocess.run(['ip', 'link', 'show'], capture_output=True, text=True)
-                if 'tun' in result.stdout:
-                    # Find the tun device name
-                    for line in result.stdout.split('\n'):
-                        if 'tun' in line and ':' in line:
-                            # Extract device name (format: "X: tunY: <FLAGS>...")
-                            parts = line.split(':')
-                            if len(parts) >= 2:
-                                self.current_tun_device = parts[1].strip()
-                                log.info(f"Found tun device: {self.current_tun_device}")
-                                break
-                    connected = True
-                    break
+                # Check tunnel interfaces. For AnyConnect, require an OpenConnect
+                # "session up" marker so we don't falsely bind to stale tun devices.
+                tun_devs_now = self._list_tun_devices()
+                candidate_tun = None
+                new_tun_devs = sorted(tun_devs_now - baseline_tun_devs)
+                if new_tun_devs:
+                    candidate_tun = new_tun_devs[0]
+                elif self.current_tun_device and self.current_tun_device in tun_devs_now:
+                    candidate_tun = self.current_tun_device
+                elif openconnect_reported_up and tun_devs_now:
+                    candidate_tun = sorted(tun_devs_now)[0]
+
+                if candidate_tun:
+                    self.current_tun_device = candidate_tun
+                    if protocol != 'anyconnect' or openconnect_reported_up:
+                        log.info(f"Found tun device: {self.current_tun_device}")
+                        connected = True
+                        break
 
                 time.sleep(0.5)
 
@@ -950,7 +1057,7 @@ class VPNPluginService(dbus.service.Object):
                 # Check if it's a cookie rejection
                 if 'cookie' in output_buffer.lower() and ('reject' in output_buffer.lower() or 'invalid' in output_buffer.lower() or 'fail' in output_buffer.lower()):
                     return (False, "Cookie rejected by server", 0)
-                return (False, "VPN connection timeout", 0)
+                return (False, f"VPN connection timeout after {timeout}s", 0)
 
             # Give vpnc-script a moment to configure DNS
             time.sleep(1)
@@ -1082,7 +1189,7 @@ class VPNPluginService(dbus.service.Object):
             # tundev will be set in the full Config after interface is up
             # During GlobalProtect SAML auth, avoid telling NM we already have IPv4
             # config; otherwise it may time out waiting for Ip4Config.
-            has_ip4 = self.current_protocol != 'gp'
+            has_ip4 = self.current_protocol != 'gp' and not self.auth_in_progress
             config = dbus.Dictionary({
                 'gateway': dbus.UInt32(gateway_uint),
                 'has-ip4': dbus.Boolean(has_ip4),
@@ -1128,6 +1235,8 @@ class VPNPluginService(dbus.service.Object):
     def _get_auth_started_guard_seconds(self, protocol: str) -> int:
         """Return seconds after which we emit STARTED keepalive during slow auth."""
         env_candidates = []
+        if protocol == 'anyconnect':
+            env_candidates.append("MS_SSO_NM_ANYCONNECT_AUTH_TIMEOUT_GUARD_SEC")
         if protocol == 'gp':
             env_candidates.append("MS_SSO_NM_GP_AUTH_TIMEOUT_GUARD_SEC")
         env_candidates.append("MS_SSO_NM_AUTH_TIMEOUT_GUARD_SEC")
@@ -1143,6 +1252,8 @@ class VPNPluginService(dbus.service.Object):
             except Exception:
                 log.warning(f"Ignoring invalid {env_name} value: {value!r}")
 
+        if protocol == 'anyconnect':
+            return 30
         return 45
 
     def _should_emit_started_keepalive(self, protocol: str) -> bool:
@@ -1258,8 +1369,11 @@ class VPNPluginService(dbus.service.Object):
     def _emit_started_keepalive(self):
         """Emit a keepalive STARTED state."""
         try:
-            # Intentionally emit even if our internal state didn't change.
-            self.StateChanged(NM_VPN_SERVICE_STATE_STARTED)
+            # Keep local property state consistent with emitted signal.
+            if self.state != NM_VPN_SERVICE_STATE_STARTED:
+                self._set_state(NM_VPN_SERVICE_STATE_STARTED)
+            else:
+                self.StateChanged(NM_VPN_SERVICE_STATE_STARTED)
         except Exception:
             pass
         return False
@@ -1446,24 +1560,7 @@ class VPNPluginService(dbus.service.Object):
 
         # Best effort: add currently present tunnel interfaces so DNS gets
         # reverted even when we missed current_tun_device tracking.
-        try:
-            links = subprocess.run(
-                ["ip", "-o", "link", "show"],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-            for line in links.stdout.splitlines():
-                if ":" not in line:
-                    continue
-                parts = line.split(":", 2)
-                if len(parts) < 2:
-                    continue
-                dev = parts[1].strip()
-                if dev.startswith("tun"):
-                    tun_devs.add(dev)
-        except Exception:
-            pass
+        tun_devs.update(self._list_tun_devices())
 
         # Fallback when we can't enumerate: try tun0 at minimum.
         if not tun_devs:
