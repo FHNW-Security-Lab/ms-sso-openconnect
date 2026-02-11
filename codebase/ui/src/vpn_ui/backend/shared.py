@@ -269,7 +269,25 @@ class SharedBackendMixin:
 
     def infer_connection_name(self) -> Optional[str]:
         """Try to infer connection name from running openconnect process."""
+        import shlex
         import subprocess
+        import urllib.parse
+
+        def _normalize_host(value: str) -> str:
+            text = (value or "").strip()
+            if not text:
+                return ""
+            try:
+                parsed = urllib.parse.urlparse(text if "://" in text else f"//{text}")
+                host = parsed.hostname or parsed.path or text
+            except Exception:
+                host = text
+            host = host.strip().lower()
+            if host.startswith("[") and host.endswith("]"):
+                host = host[1:-1]
+            if ":" in host and host.count(":") == 1:
+                host = host.split(":", 1)[0]
+            return host
 
         if not self.is_connected():
             return None
@@ -284,34 +302,91 @@ class SharedBackendMixin:
             if result.returncode != 0:
                 return None
 
-            cmd_line = result.stdout.strip()
-
-            # Extract server address from command line
-            parts = cmd_line.split()
-            if len(parts) < 2:
+            lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+            if not lines:
                 return None
 
+            # Prefer the most recently started openconnect process (highest PID).
+            chosen_cmd = None
+            chosen_pid = -1
+            for line in lines:
+                parts = line.split(maxsplit=1)
+                if len(parts) < 2:
+                    continue
+                try:
+                    pid = int(parts[0])
+                except Exception:
+                    continue
+                if pid >= chosen_pid:
+                    chosen_pid = pid
+                    chosen_cmd = parts[1]
+            if not chosen_cmd:
+                return None
+
+            try:
+                tokens = shlex.split(chosen_cmd)
+            except Exception:
+                tokens = chosen_cmd.split()
+            if len(tokens) < 2:
+                return None
+
+            cmd_protocol = None
+            skip_next = False
+            for idx, tok in enumerate(tokens):
+                if skip_next:
+                    skip_next = False
+                    continue
+
+                if tok.startswith("--protocol="):
+                    proto = tok.split("=", 1)[1].strip().lower()
+                    if proto in {"gp", "anyconnect"}:
+                        cmd_protocol = proto
+                    continue
+                if tok == "--protocol" and idx + 1 < len(tokens):
+                    proto = tokens[idx + 1].strip().lower()
+                    if proto in {"gp", "anyconnect"}:
+                        cmd_protocol = proto
+                    skip_next = True
+                    continue
+
+                if tok == "--protocol":
+                    skip_next = True
+                    continue
+
             server_address = None
-            for i, part in enumerate(parts):
-                if part.startswith("--server="):
-                    server_address = part.split("=", 1)[1]
+            for tok in tokens:
+                if tok.startswith("--server="):
+                    server_address = tok.split("=", 1)[1]
                     break
-                # Check if it looks like a hostname
-                if not part.startswith("-") and "." in part and part != "openconnect":
-                    server_address = part
+            if not server_address:
+                for idx, tok in enumerate(tokens):
+                    if tok == "--server" and idx + 1 < len(tokens):
+                        server_address = tokens[idx + 1]
+                        break
+            if not server_address:
+                # Fallback: openconnect server is typically the last positional arg.
+                for tok in reversed(tokens):
+                    if not tok.startswith("-") and tok != "openconnect":
+                        server_address = tok
+                        break
 
             if not server_address:
+                return None
+            server_host = _normalize_host(server_address)
+            if not server_host:
                 return None
 
             # Match against saved connections
             connections = self.get_connections()
             for name, details in connections.items():
-                conn_address = details.get("address", "")
-                if conn_address and (
-                    conn_address == server_address or
-                    conn_address in server_address or
-                    server_address in conn_address
-                ):
+                conn_address = details.get("address", "") or ""
+                conn_host = _normalize_host(conn_address)
+                if not conn_host:
+                    continue
+                conn_protocol = (details.get("protocol", "") or "").strip().lower()
+                if cmd_protocol and conn_protocol and conn_protocol != cmd_protocol:
+                    continue
+                if conn_host == server_host:
                     return name
 
         except Exception:

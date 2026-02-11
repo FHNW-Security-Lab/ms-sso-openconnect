@@ -1,6 +1,7 @@
 """Main application controller for VPN UI."""
 
 import sys
+import time
 from typing import Optional
 
 from PyQt6.QtCore import QCoreApplication, QTimer
@@ -177,6 +178,10 @@ class VPNApplication:
             # Disconnect first
             self._disconnect_sync()
 
+        # Clear stale state before a new connect so tray polling cannot revive
+        # a previous connection label during handover.
+        self.backend.clear_active_connection()
+
         self._current_connection = connection_name
         self.tray.set_status(STATUS_CONNECTING, connection_name)
         self.notifications.connecting(connection_name)
@@ -233,7 +238,20 @@ class VPNApplication:
 
     def _disconnect_sync(self) -> None:
         """Disconnect synchronously (for reconnection flow)."""
-        self.backend.disconnect(force=False)
+        success = self.backend.disconnect(force=False)
+        if not success:
+            # Fallback to force termination when graceful keep-session disconnect
+            # did not stop the previous tunnel.
+            self.backend.disconnect(force=True)
+
+        # Wait briefly for old tunnel teardown to avoid cross-connection races.
+        for _ in range(20):
+            if not self.backend.is_connected():
+                break
+            time.sleep(0.25)
+
+        self.backend.clear_active_connection()
+        self.tray.set_status(STATUS_DISCONNECTED)
 
     def _on_progress(self, message: str) -> None:
         """Handle progress updates from worker.

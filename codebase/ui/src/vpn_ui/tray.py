@@ -231,6 +231,16 @@ class VPNTrayIcon(QObject):
 
         # Update status based on poll result
         if is_connected:
+            # While a connect flow is in progress, trust the user-selected target
+            # and avoid stale state/inference from a previous tunnel.
+            if self._current_status == STATUS_CONNECTING and self._current_connection:
+                self.set_status(STATUS_CONNECTED, self._current_connection)
+                try:
+                    backend.save_active_connection(self._current_connection)
+                except Exception:
+                    pass
+                return
+
             if self._current_status != STATUS_CONNECTED:
                 # VPN connected - try to get connection name from state
                 conn_name = "Unknown"

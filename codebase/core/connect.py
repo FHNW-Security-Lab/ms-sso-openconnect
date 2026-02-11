@@ -18,6 +18,49 @@ BOLD = "\033[1m"
 NC = "\033[0m"
 
 
+def _cleanup_dns_best_effort(use_pkexec: bool = False) -> None:
+    """Best-effort DNS cleanup for tun interfaces after failure/disconnect."""
+    tun_devs = set()
+    try:
+        links = subprocess.run(
+            ["ip", "-o", "link", "show"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        for line in links.stdout.splitlines():
+            if ":" not in line:
+                continue
+            parts = line.split(":", 2)
+            if len(parts) < 2:
+                continue
+            dev = parts[1].strip()
+            if dev.startswith("tun"):
+                tun_devs.add(dev)
+    except Exception:
+        pass
+
+    if not tun_devs:
+        tun_devs.add("tun0")
+
+    def _run_cleanup_cmd(cmd: list[str]) -> None:
+        candidates = [cmd]
+        if use_pkexec:
+            candidates.append(["pkexec"] + cmd)
+        else:
+            candidates.append(["sudo", "-n"] + cmd)
+
+        for full_cmd in candidates:
+            try:
+                subprocess.run(full_cmd, capture_output=True, text=True, check=False, timeout=5)
+            except Exception:
+                continue
+
+    for dev in sorted(tun_devs):
+        _run_cleanup_cmd(["resolvectl", "revert", dev])
+        _run_cleanup_cmd(["resolvconf", "-d", dev])
+
+
 def connect_vpn(
     vpn_server: str,
     protocol: str,
@@ -203,6 +246,7 @@ def connect_vpn(
         returncode = process.wait()
 
     if returncode != 0:
+        _cleanup_dns_best_effort(use_pkexec=use_pkexec)
         print(f"\n{YELLOW}Connection failed (exit code {returncode}).{NC}")
         return False
     return True
@@ -223,6 +267,7 @@ def disconnect(force: bool = False) -> bool:
         capture_output=True
     )
     if result.returncode == 0:
+        _cleanup_dns_best_effort(use_pkexec=False)
         if force:
             clear_cookies()
             print(f"{GREEN}VPN disconnected and session terminated.{NC}")
@@ -230,5 +275,6 @@ def disconnect(force: bool = False) -> bool:
             print(f"{GREEN}VPN disconnected (session kept alive for reconnect).{NC}")
         return True
     else:
+        _cleanup_dns_best_effort(use_pkexec=False)
         print(f"{YELLOW}No active VPN connection found.{NC}")
         return False

@@ -908,6 +908,16 @@ class VPNPluginService(dbus.service.Object):
                 time.sleep(0.5)
 
             if not connected:
+                # Ensure failed/timeout attempts do not leave a stray OpenConnect
+                # process or DNS state behind.
+                try:
+                    if self.vpn_process and self.vpn_process.poll() is None:
+                        self.vpn_process.kill()
+                        self.vpn_process.wait(timeout=5)
+                except Exception:
+                    pass
+                self._cleanup_dns()
+
                 # Check if it's a cookie rejection
                 if 'cookie' in output_buffer.lower() and ('reject' in output_buffer.lower() or 'invalid' in output_buffer.lower() or 'fail' in output_buffer.lower()):
                     return (False, "Cookie rejected by server", 0)
@@ -978,6 +988,13 @@ class VPNPluginService(dbus.service.Object):
         except Exception as e:
             error_msg = str(e)
             log.info(f"Attempt error: {error_msg}")
+            try:
+                if self.vpn_process and self.vpn_process.poll() is None:
+                    self.vpn_process.kill()
+                    self.vpn_process.wait(timeout=5)
+            except Exception:
+                pass
+            self._cleanup_dns()
             # Check if it's a cookie rejection error
             if 'cookie' in error_msg.lower() and ('reject' in error_msg.lower() or 'invalid' in error_msg.lower()):
                 return (False, "Cookie rejected by server", 0)
@@ -1378,33 +1395,63 @@ class VPNPluginService(dbus.service.Object):
 
     def _cleanup_dns(self):
         """Attempt to clear DNS settings left behind on disconnect/failure."""
-        tun_dev = self.current_tun_device
-        if not tun_dev:
-            return
-        if shutil.which("resolvectl"):
-            try:
-                subprocess.run(
-                    ["resolvectl", "revert", tun_dev],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                log.info(f"Reverted DNS settings for {tun_dev}")
-                return
-            except Exception as e:
-                log.info(f"resolvectl revert failed for {tun_dev}: {e}")
-        # Fallback: try resolvconf if present
-        if shutil.which("resolvconf"):
-            try:
-                subprocess.run(
-                    ["resolvconf", "-d", tun_dev],
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                log.info(f"Removed resolvconf entry for {tun_dev}")
-            except Exception as e:
-                log.info(f"resolvconf cleanup failed for {tun_dev}: {e}")
+        tun_devs = set()
+        if self.current_tun_device:
+            tun_devs.add(self.current_tun_device)
+
+        # Best effort: add currently present tunnel interfaces so DNS gets
+        # reverted even when we missed current_tun_device tracking.
+        try:
+            links = subprocess.run(
+                ["ip", "-o", "link", "show"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            for line in links.stdout.splitlines():
+                if ":" not in line:
+                    continue
+                parts = line.split(":", 2)
+                if len(parts) < 2:
+                    continue
+                dev = parts[1].strip()
+                if dev.startswith("tun"):
+                    tun_devs.add(dev)
+        except Exception:
+            pass
+
+        # Fallback when we can't enumerate: try tun0 at minimum.
+        if not tun_devs:
+            tun_devs.add("tun0")
+
+        for tun_dev in sorted(tun_devs):
+            cleaned = False
+            if shutil.which("resolvectl"):
+                try:
+                    subprocess.run(
+                        ["resolvectl", "revert", tun_dev],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    log.info(f"Reverted DNS settings for {tun_dev}")
+                    cleaned = True
+                except Exception as e:
+                    log.info(f"resolvectl revert failed for {tun_dev}: {e}")
+            # Fallback: try resolvconf if present
+            if not cleaned and shutil.which("resolvconf"):
+                try:
+                    subprocess.run(
+                        ["resolvconf", "-d", tun_dev],
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    log.info(f"Removed resolvconf entry for {tun_dev}")
+                except Exception as e:
+                    log.info(f"resolvconf cleanup failed for {tun_dev}: {e}")
+
+        # Always clear in-memory DNS/tunnel state, even when no tun device was found.
         self.vpn_dns_servers = []
         self.vpn_domains = []
         self.current_tun_device = None
