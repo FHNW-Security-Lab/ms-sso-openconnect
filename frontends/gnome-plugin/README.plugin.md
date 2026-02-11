@@ -180,6 +180,13 @@ MS_SSO_NM_GP_EARLY_STARTED=0
 # Optional guard thresholds for keepalive behavior
 MS_SSO_NM_AUTH_TIMEOUT_GUARD_SEC=45
 MS_SSO_NM_GP_AUTH_TIMEOUT_GUARD_SEC=45
+
+# Delay before GP initial Config emission (default: 20 seconds)
+MS_SSO_NM_GP_CONFIG_DELAY=20
+
+# Keepalive cadence during long authentication (default: 10 seconds)
+MS_SSO_NM_AUTH_KEEPALIVE_SECONDS=10
+MS_SSO_NM_GP_AUTH_KEEPALIVE_SECONDS=10
 ```
 
 ## Watchdog and Auto-Reconnect

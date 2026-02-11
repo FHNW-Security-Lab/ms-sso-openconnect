@@ -24,6 +24,7 @@ import socket
 import ipaddress
 import shutil
 from pathlib import Path
+from typing import Optional
 
 # Set up logging - use syslog for reliability
 log = logging.getLogger('nm-ms-sso')
@@ -154,6 +155,8 @@ class VPNPluginService(dbus.service.Object):
         # Cancel flag (e.g. NM timeout/user disconnect) so we don't continue
         # long-running auth and connect behind NetworkManager's back.
         self.cancel_requested = False
+        # Generation counter to invalidate stale overlapping connect threads.
+        self._connect_generation = 0
 
         # Register on D-Bus
         bus_name = dbus.service.BusName(NM_DBUS_SERVICE, bus=bus)
@@ -179,7 +182,10 @@ class VPNPluginService(dbus.service.Object):
 
     def _on_inactivity_timeout(self):
         """Called when the service has been inactive for too long."""
-        # Mark timeout as fired so we don't try to remove it later
+        # Keep the service alive while a connection worker is still active.
+        if self.connection_thread and self.connection_thread.is_alive():
+            return True
+        # Mark timeout as fired so we don't try to remove it later.
         self.inactivity_timeout = None
         if self.state in (NM_VPN_SERVICE_STATE_INIT, NM_VPN_SERVICE_STATE_STOPPED):
             log.info("Inactivity timeout, shutting down")
@@ -321,22 +327,35 @@ class VPNPluginService(dbus.service.Object):
             pass
         return default
 
-    def _interruptible_sleep(self, seconds: int) -> bool:
+    def _is_connect_cancelled(self, connect_generation: Optional[int] = None) -> bool:
+        """Return True when the active connect flow should abort."""
+        if self.cancel_requested:
+            return True
+        if connect_generation is not None and connect_generation != self._connect_generation:
+            return True
+        return False
+
+    def _interruptible_sleep(self, seconds: int, connect_generation: Optional[int] = None) -> bool:
         """Sleep up to `seconds`, aborting early if disconnect is requested."""
         if seconds <= 0:
-            return not self.cancel_requested
+            return not self._is_connect_cancelled(connect_generation)
         end_time = time.monotonic() + seconds
         while time.monotonic() < end_time:
-            if self.cancel_requested:
+            if self._is_connect_cancelled(connect_generation):
                 return False
             time.sleep(min(0.5, end_time - time.monotonic()))
-        return not self.cancel_requested
+        return not self._is_connect_cancelled(connect_generation)
 
-    def _connect_thread(self, settings):
+    def _connect_thread(self, settings, connect_generation: int):
         """Worker thread for VPN connection."""
         try:
             self._reset_inactivity_timeout()
+            if connect_generation != self._connect_generation:
+                return
             self.cancel_requested = False
+
+            def _connect_cancelled() -> bool:
+                return self._is_connect_cancelled(connect_generation)
 
             # Extract connection parameters
             secrets = self._get_connection_secrets(settings)
@@ -498,7 +517,15 @@ class VPNPluginService(dbus.service.Object):
                 )
 
             reconnect_attempt = 0
-            while not self.cancel_requested:
+            saml_keepalive_seconds = self._parse_positive_int(
+                os.environ.get("MS_SSO_NM_AUTH_KEEPALIVE_SECONDS"),
+                self._parse_positive_int(
+                    os.environ.get("MS_SSO_NM_GP_AUTH_KEEPALIVE_SECONDS") if protocol == 'gp' else None,
+                    10,
+                ),
+            )
+
+            while not _connect_cancelled():
                 # Try connection with retry on cookie rejection.
                 max_attempts = 2 + anyconnect_fresh_retries
                 connection_ended = False
@@ -507,7 +534,7 @@ class VPNPluginService(dbus.service.Object):
 
                 for attempt in range(max_attempts):
                     log.info(f"Connection attempt {attempt + 1}/{max_attempts}")
-                    if self.cancel_requested:
+                    if _connect_cancelled():
                         log.info("Connect cancelled before authentication; aborting")
                         return
 
@@ -549,8 +576,8 @@ class VPNPluginService(dbus.service.Object):
                         stop_keepalive = threading.Event()
 
                         def _saml_keepalive():
-                            while not stop_keepalive.wait(15):
-                                if self.cancel_requested:
+                            while not stop_keepalive.wait(max(1, saml_keepalive_seconds)):
+                                if _connect_cancelled():
                                     return
                                 if protocol != 'gp' or self._gp_initial_config_allowed():
                                     GLib.idle_add(self._emit_initial_config)
@@ -624,7 +651,7 @@ class VPNPluginService(dbus.service.Object):
                         if not cookies:
                             raise Exception("SAML authentication returned no cookies")
 
-                        if self.cancel_requested:
+                        if _connect_cancelled():
                             log.info("Connect cancelled during authentication; aborting")
                             return
 
@@ -633,7 +660,7 @@ class VPNPluginService(dbus.service.Object):
                             store_nm_cookies(connection_name, cookies, usergroup='portal:prelogin-cookie')
 
                     # Try to connect with these cookies
-                    if self.cancel_requested:
+                    if _connect_cancelled():
                         log.info("Connect cancelled before starting OpenConnect; aborting")
                         return
                     success, error_msg, uptime_seconds = self._attempt_vpn_connection(
@@ -641,6 +668,7 @@ class VPNPluginService(dbus.service.Object):
                         protocol,
                         cookies,
                         username,
+                        connect_generation=connect_generation,
                         watchdog_interval_seconds=watchdog_interval_seconds,
                         watchdog_missing_tun_limit=watchdog_missing_tun_limit,
                     )
@@ -668,7 +696,7 @@ class VPNPluginService(dbus.service.Object):
                         )
                         clear_nm_cookies(connection_name)
                         if anyconnect_retry_delay_seconds > 0:
-                            if not self._interruptible_sleep(anyconnect_retry_delay_seconds):
+                            if not self._interruptible_sleep(anyconnect_retry_delay_seconds, connect_generation):
                                 return
                         continue
                     else:
@@ -677,7 +705,7 @@ class VPNPluginService(dbus.service.Object):
                         final_error = error_msg or "VPN connection failed"
                         break
 
-                if self.cancel_requested:
+                if _connect_cancelled():
                     return
 
                 if not connection_ended:
@@ -706,7 +734,7 @@ class VPNPluginService(dbus.service.Object):
                         GLib.idle_add(self._emit_starting_keepalive)
                     if protocol != 'gp' or self._gp_initial_config_allowed():
                         GLib.idle_add(self._emit_initial_config)
-                    if not self._interruptible_sleep(delay_seconds):
+                    if not self._interruptible_sleep(delay_seconds, connect_generation):
                         return
                     continue
 
@@ -742,7 +770,7 @@ class VPNPluginService(dbus.service.Object):
                     GLib.idle_add(self._emit_starting_keepalive)
                 if protocol != 'gp' or self._gp_initial_config_allowed():
                     GLib.idle_add(self._emit_initial_config)
-                if not self._interruptible_sleep(delay_seconds):
+                if not self._interruptible_sleep(delay_seconds, connect_generation):
                     return
 
         except Exception as e:
@@ -758,6 +786,7 @@ class VPNPluginService(dbus.service.Object):
             protocol,
             cookies,
             username=None,
+            connect_generation: Optional[int] = None,
             watchdog_interval_seconds=5,
             watchdog_missing_tun_limit=3,
     ):
@@ -937,7 +966,7 @@ class VPNPluginService(dbus.service.Object):
             watch_interval = max(1, int(watchdog_interval_seconds))
             tun_miss_limit = max(1, int(watchdog_missing_tun_limit))
             while self.vpn_process.poll() is None:
-                if self.cancel_requested:
+                if self._is_connect_cancelled(connect_generation):
                     break
                 tun_dev = self.current_tun_device
                 if tun_dev:
@@ -980,7 +1009,7 @@ class VPNPluginService(dbus.service.Object):
                     except Exception:
                         exit_code = self.vpn_process.poll()
             uptime_seconds = int(max(0, time.monotonic() - connected_at))
-            if exit_code not in (0, None) and not self.cancel_requested:
+            if exit_code not in (0, None) and not self._is_connect_cancelled(connect_generation):
                 log.warning(f"OpenConnect exited with code {exit_code} after {uptime_seconds}s")
 
             return (True, None, uptime_seconds)
@@ -1018,6 +1047,16 @@ class VPNPluginService(dbus.service.Object):
 
             # Use pre-resolved gateway IP (resolved before VPN connected, when external DNS was available)
             gateway_ip = getattr(self, 'current_gateway_ip', None)
+            if not gateway_ip and gateway:
+                try:
+                    from urllib.parse import urlparse
+                    parsed = urlparse(gateway if "://" in gateway else f"//{gateway}")
+                    lookup = parsed.hostname or gateway
+                    gateway_ip = socket.gethostbyname(lookup)
+                    self.current_gateway_ip = gateway_ip
+                    log.info(f"Late-resolved gateway {lookup} -> {gateway_ip}")
+                except Exception as e:
+                    log.warning(f"Late gateway resolve failed for {gateway}: {e}")
             if gateway_ip:
                 log.info(f"Using pre-resolved gateway IP: {gateway_ip}")
             else:
@@ -1034,7 +1073,12 @@ class VPNPluginService(dbus.service.Object):
                 except Exception as e:
                     log.info(f"Warning: Could not convert gateway IP '{gateway_ip}': {e}")
 
-            # Emit Config signal WITHOUT tundev - just gateway info
+            # Emit Config signal WITHOUT tundev - just gateway info.
+            # Do not emit gateway=0 for GP: NetworkManager treats it as invalid config.
+            if self.current_protocol == 'gp' and gateway_uint == 0:
+                log.warning("Skipping GP initial Config emission until gateway IP is known")
+                return False
+
             # tundev will be set in the full Config after interface is up
             # During GlobalProtect SAML auth, avoid telling NM we already have IPv4
             # config; otherwise it may time out waiting for Ip4Config.
@@ -1061,9 +1105,10 @@ class VPNPluginService(dbus.service.Object):
             return True
         delay_env = os.environ.get("MS_SSO_NM_GP_CONFIG_DELAY", "").strip()
         try:
-            delay_seconds = int(delay_env) if delay_env else 55
+            # Default below NetworkManager's observed connect timeout window.
+            delay_seconds = int(delay_env) if delay_env else 20
         except Exception:
-            delay_seconds = 55
+            delay_seconds = 20
         start_time = None
         if getattr(self, "auth_in_progress", False) and getattr(self, "saml_start_time", None):
             start_time = self.saml_start_time
@@ -1464,13 +1509,23 @@ class VPNPluginService(dbus.service.Object):
         log.info("Connect called")
         self._reset_inactivity_timeout()
 
+        # Supersede any previous in-flight connect worker.
+        self.cancel_requested = True
+        self._connect_generation += 1
+        connect_generation = self._connect_generation
+        if self.connection_thread and self.connection_thread.is_alive():
+            log.warning("Connect called while previous connect thread is still running; superseding old request")
+
         self._set_state(NM_VPN_SERVICE_STATE_STARTING)
 
         # Convert D-Bus types to Python
         settings = {str(k): {str(k2): v2 for k2, v2 in v.items()} for k, v in connection.items()}
 
         # Start connection in background thread
-        self.connection_thread = threading.Thread(target=self._connect_thread, args=(settings,))
+        self.connection_thread = threading.Thread(
+            target=self._connect_thread,
+            args=(settings, connect_generation),
+        )
         self.connection_thread.daemon = True
         self.connection_thread.start()
 
@@ -1488,6 +1543,7 @@ class VPNPluginService(dbus.service.Object):
         log.info("Disconnect called")
         self._reset_inactivity_timeout()
         self.cancel_requested = True
+        self._connect_generation += 1
 
         self._set_state(NM_VPN_SERVICE_STATE_STOPPING)
 
