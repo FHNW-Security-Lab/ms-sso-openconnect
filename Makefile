@@ -1,6 +1,6 @@
 VERSION ?= 2.0.0
 
-.PHONY: help appimage deb linux-all pkg gnome-deb nix nix-core nix-ui nix-plugin
+.PHONY: help appimage deb linux-all pkg nix nix-core nix-ui
 
 help:
 	@./build/build.sh help
@@ -17,9 +17,6 @@ linux-all:
 pkg:
 	@./build/build.sh pkg $(VERSION)
 
-gnome-deb:
-	@./build/build.sh gnome-deb
-
 nix:
 	@./build/build.sh nix all
 
@@ -28,6 +25,3 @@ nix-core:
 
 nix-ui:
 	@./build/build.sh nix ui
-
-nix-plugin:
-	@./build/build.sh nix plugin

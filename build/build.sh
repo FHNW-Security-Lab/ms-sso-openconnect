@@ -19,9 +19,6 @@ case "$TARGET" in
     pkg|osx-pkg)
         "$SCRIPT_DIR/build-macos.sh" "$VERSION"
         ;;
-    gnome-deb)
-        "$SCRIPT_DIR/build-gnome-plugin.sh"
-        ;;
     nix)
         "$SCRIPT_DIR/build-nix.sh" "${2:-all}"
         ;;
@@ -34,8 +31,7 @@ Usage:
   ./build/build.sh deb [version]
   ./build/build.sh linux-all [version]
   ./build/build.sh pkg [version]
-  ./build/build.sh gnome-deb
-  ./build/build.sh nix [core|ui|plugin|all]
+  ./build/build.sh nix [core|ui|all]
 EOF
         ;;
     *)

@@ -18,16 +18,12 @@ case "$TARGET" in
     ui)
         build_one ms-sso-openconnect-ui
         ;;
-    plugin|gnome-plugin)
-        build_one networkmanager-ms-sso
-        ;;
     all)
         build_one ms-sso-openconnect-core
         build_one ms-sso-openconnect-ui
-        build_one networkmanager-ms-sso
         ;;
     *)
-        echo "Usage: $0 [core|ui|plugin|all]"
+        echo "Usage: $0 [core|ui|all]"
         exit 1
         ;;
 esac

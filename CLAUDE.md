@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 MS SSO OpenConnect is a multi-platform VPN connection tool for Microsoft SSO-protected networks. It uses Playwright for headless browser automation to handle Microsoft authentication, then connects via OpenConnect.
 
 **Supported Protocols**: Cisco AnyConnect, GlobalProtect
-**Frontends**: CLI, Unified Qt6 GUI (Linux/macOS), GNOME NetworkManager Plugin
+**Frontends**: CLI, Unified Qt6 GUI (Linux/macOS)
 
 ## Architecture
 
@@ -31,7 +31,6 @@ codebase/ui/            # Shared Qt6 UI code (Linux + macOS)
 
 frontends/linux/        # Linux packaging/build frontend
 frontends/osx/          # macOS packaging/build frontend (+ daemon)
-frontends/gnome-plugin/ # GNOME NetworkManager VPN plugin (D-Bus + GTK4)
 ```
 
 **Key Patterns**:
@@ -56,11 +55,6 @@ chmod +x ms-sso-openconnect
 ### Unified UI (macOS)
 ```bash
 ./frontends/osx/build.sh [version]    # Build .pkg with daemon
-```
-
-### GNOME NetworkManager Plugin
-```bash
-./frontends/gnome-plugin/build.sh     # Build .deb with meson
 ```
 
 ## Testing
@@ -107,4 +101,4 @@ python -m vpn_ui              # Run UI from source
 3. `codebase/ui/src/vpn_ui/backend/shared.py` - How GUI wraps core module
 4. `codebase/ui/src/vpn_ui/platform/backend.py` - Platform-specific connect/disconnect
 5. `frontends/osx/daemon/vpn_daemon.py` - macOS daemon implementation
-6. `frontends/gnome-plugin/src/nm-ms-sso-service.py` - D-Bus VPN service implementation
+6. `frontends/linux/build.sh` - Linux packaging entrypoint

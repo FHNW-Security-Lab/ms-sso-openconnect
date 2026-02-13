@@ -25,12 +25,3 @@ ui/build/
 ui/dist/
 *.AppImage
 appimagetool*
-
-# NetworkManager plugin build artifacts
-gnome-nm-plugin/build/
-gnome-nm-plugin/debian-build/
-gnome-nm-plugin/dist/
-gnome-nm-plugin/*.deb
-gnome-nm-plugin/*.ddeb
-gnome-nm-plugin/*.buildinfo
-gnome-nm-plugin/*.changes

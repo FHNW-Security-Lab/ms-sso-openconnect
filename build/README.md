@@ -12,7 +12,6 @@ Canonical build entrypoint:
 - `deb` - build Linux Qt frontend Debian package
 - `linux-all` - build both Linux Qt artifacts
 - `pkg` - build macOS package (`.pkg`)
-- `gnome-deb` - build GNOME NetworkManager plugin Debian package
-- `nix` - build Nix attributes (`core`, `ui`, `plugin`, `all`)
+- `nix` - build Nix attributes (`core`, `ui`, `all`)
 
 Equivalent `make` targets are available in the top-level `Makefile`.

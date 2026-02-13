@@ -16,11 +16,9 @@
           pkgs = nixpkgs.legacyPackages.${system};
           packages = import ./nix/packages.nix { inherit pkgs; };
         in
-        packages // { default = packages.networkmanager-ms-sso; }
+        packages // { default = packages.ms-sso-openconnect-ui; }
       );
 
       overlays.default = import ./nix/overlay.nix;
-
-      nixosModules.default = import ./nix/nixos-module.nix;
     };
 }

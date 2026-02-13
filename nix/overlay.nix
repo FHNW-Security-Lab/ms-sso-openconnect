@@ -6,6 +6,5 @@ in
 {
   inherit (packages)
     ms-sso-openconnect-core
-    ms-sso-openconnect-ui
-    networkmanager-ms-sso;
+    ms-sso-openconnect-ui;
 }
