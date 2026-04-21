@@ -25,3 +25,6 @@ ui/build/
 ui/dist/
 *.AppImage
 appimagetool*
+
+# Öpfel
+.DS_Store
