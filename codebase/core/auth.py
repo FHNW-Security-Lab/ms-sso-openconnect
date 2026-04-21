@@ -177,18 +177,21 @@ def do_saml_auth(
             real_user = detected_user
             if debug:
                 print(f"    [DEBUG] Detected desktop user: {real_user}")
-    if real_user != "root":
-        try:
-            import pwd
-            home = pwd.getpwnam(real_user).pw_dir
-            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = f"{home}/.cache/ms-playwright"
-        except Exception:
-            pass
-    else:
-        for pw_path in ["/var/cache/ms-playwright", "/opt/ms-playwright", "/usr/share/ms-playwright"]:
-            if os.path.isdir(pw_path):
-                os.environ["PLAYWRIGHT_BROWSERS_PATH"] = pw_path
-                break
+    # Only set if not already configured (e.g. by a packaged app launcher
+    # pointing at browsers bundled inside the .app on macOS).
+    if "PLAYWRIGHT_BROWSERS_PATH" not in os.environ:
+        if real_user != "root":
+            try:
+                import pwd
+                home = pwd.getpwnam(real_user).pw_dir
+                os.environ["PLAYWRIGHT_BROWSERS_PATH"] = f"{home}/.cache/ms-playwright"
+            except Exception:
+                pass
+        else:
+            for pw_path in ["/var/cache/ms-playwright", "/opt/ms-playwright", "/usr/share/ms-playwright"]:
+                if os.path.isdir(pw_path):
+                    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = pw_path
+                    break
 
     with sync_playwright() as p:
         session_tmp_dir = None
