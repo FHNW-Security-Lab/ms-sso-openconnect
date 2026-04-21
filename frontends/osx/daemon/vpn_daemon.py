@@ -44,14 +44,6 @@ def find_openconnect() -> Optional[str]:
     return None
 
 
-# Try to import from protocol module, but make it optional for standalone use
-try:
-    from ui.macos.daemon.protocol import Request, Response, ErrorCode, Method
-    USE_PROTOCOL_MODULE = True
-except ImportError:
-    USE_PROTOCOL_MODULE = False
-
-
 class VPNDaemon:
     """VPN daemon that manages openconnect connections."""
 

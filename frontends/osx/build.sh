@@ -11,3 +11,8 @@ mkdir -p "$REPO_ROOT/dist/osx/pkg"
 find "$REPO_ROOT/frontends/osx/dist" -maxdepth 1 -type f -name '*.pkg' -exec cp -f {} "$REPO_ROOT/dist/osx/pkg/" \;
 
 echo "macOS artifacts collected under: $REPO_ROOT/dist/osx/pkg/"
+
+PKG_PATH="$REPO_ROOT/frontends/osx/dist/MS-SSO-OpenConnect-${VERSION}.pkg"
+if [[ -f "$PKG_PATH" ]]; then
+    open "$PKG_PATH"
+fi

@@ -1,74 +1,68 @@
 # MS SSO OpenConnect
 
-VPN connection tool for Microsoft SSO-protected networks.
+VPN connection tool for Microsoft SSO-protected networks. Handles SAML auth via a headless browser, then hands off to `openconnect`.
 
-This repository now contains:
+This repository contains:
 
 - command-line client
 - Linux desktop UI (Qt)
-- shared core runtime used by CLI/UI
+- macOS desktop UI (Qt + LaunchDaemon)
+- shared core runtime used by CLI and both UIs
 
 The GNOME NetworkManager plugin has moved to a separate repository: `gnome-ms-sso-plugin`.
 
-## Build and Packaging
+## Prerequisites
 
-Use the unified build entrypoint:
+- Python 3.10+
+- `openconnect` on PATH (`brew install openconnect` on macOS, `apt install openconnect` on Debian/Ubuntu)
 
-```bash
-./build/build.sh <target> [version-or-component]
-```
-
-Supported targets:
-
-- `appimage` (Linux UI)
-- `deb` (Linux UI)
-- `linux-all` (Linux UI AppImage + deb)
-- `pkg` (macOS UI package)
-- `nix` (`core`, `ui`, `all`)
-
-Optional `make` shortcuts:
+## Command-Line Tool
 
 ```bash
-make appimage VERSION=2.0.0
-make deb VERSION=2.0.0
-make pkg VERSION=2.0.0
-make nix
+./ms-sso-openconnect --setup    # first run: creates venv, installs deps
+./ms-sso-openconnect            # connect
+./ms-sso-openconnect --list     # list configured connections
 ```
+
+## Linux UI
+
+Build a `.deb`, `.AppImage`, or both:
+
+```bash
+./frontends/linux/build.sh [version] [appimage|deb|all]
+```
+
+Artifacts land under `frontends/linux/dist/` and are mirrored to `dist/linux/`.
+
+## macOS UI
+
+Build and install the `.pkg`:
+
+```bash
+./frontends/osx/build.sh [version]
+```
+
+The script builds the signed/ad-hoc-signed bundle, bundles Chromium for Playwright, writes the LaunchDaemon, and auto-opens the installer. The `.pkg` installs the app to `/Applications/` and the daemon to `/Library/PrivilegedHelperTools/`.
 
 ## Nix
-
-Build with flakes:
 
 ```bash
 nix build .#ms-sso-openconnect-core
 nix build .#ms-sso-openconnect-ui
 ```
 
-## Command-Line Tool
-
-```bash
-./ms-sso-openconnect --setup
-./ms-sso-openconnect
-./ms-sso-openconnect --list
-```
-
-## Linux UI
-
-Linux packaging assets live in `frontends/linux/`.
-
 ## Layout
 
 ```text
-codebase/                # Shared architecture docs and runtime contracts
-codebase/core/           # Shared auth/connect logic used by CLI/UI
-codebase/ui/             # Shared Qt codebase used by Linux/macOS frontends
+codebase/core/           # Shared auth / connect / config / cookies / totp
+codebase/ui/             # Shared Qt UI (Linux + macOS)
 ms-sso-openconnect.py    # CLI entry point
-ms-sso-openconnect       # CLI bootstrap wrapper
+ms-sso-openconnect       # CLI bootstrap wrapper (creates venv on first run)
 
-frontends/
-├── linux/               # Linux Qt frontend build wrapper
-└── osx/                 # macOS Qt frontend build wrapper
+frontends/linux/         # Linux packaging (AppImage, .deb)
+frontends/osx/           # macOS packaging (.pkg) + LaunchDaemon
 
-build/                   # Unified build entrypoints
-nix/                     # Nix packaging support
+nix/                     # Nix packaging
 ```
+
+See `CLAUDE.md` for architecture details.

@@ -1,9 +1,10 @@
 """System tray icon and menu for VPN UI."""
 
+import platform
 from typing import Optional
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QIcon
+from PyQt6.QtCore import QObject, QTimer, Qt, pyqtSignal
+from PyQt6.QtGui import QAction, QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PyQt6.QtWidgets import QMenu, QSystemTrayIcon
 
 from vpn_ui.constants import (
@@ -13,6 +14,62 @@ from vpn_ui.constants import (
     STATUS_DISCONNECTED,
     get_icon,
 )
+
+
+def _create_macos_template_icon(status: str) -> QIcon:
+    """Create a macOS-compatible template icon for the menu bar.
+
+    macOS menu bar icons must be monochrome (black) on transparent background
+    and marked as template so the system auto-colors for light/dark mode.
+    """
+    size = 22  # Standard macOS menu bar icon size
+
+    def _render(scale: float) -> QPixmap:
+        pix = QPixmap(int(size * scale), int(size * scale))
+        pix.fill(QColor(0, 0, 0, 0))
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.scale(scale, scale)
+
+        color = QColor(0, 0, 0, 255)
+        pen = QPen(color, 1.5)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+
+        shield = QPainterPath()
+        shield.moveTo(11, 2)
+        shield.lineTo(19, 5)
+        shield.lineTo(19, 10)
+        shield.cubicTo(19, 15, 15, 19, 11, 20)
+        shield.cubicTo(7, 19, 3, 15, 3, 10)
+        shield.lineTo(3, 5)
+        shield.closeSubpath()
+        p.setBrush(QColor(0, 0, 0, 0))
+        p.drawPath(shield)
+
+        if status == STATUS_CONNECTED:
+            p.setPen(QPen(color, 2))
+            p.drawLine(8, 12, 10, 14)
+            p.drawLine(10, 14, 14, 9)
+        elif status == STATUS_CONNECTING:
+            p.setBrush(color)
+            p.drawEllipse(7, 11, 2, 2)
+            p.drawEllipse(10, 11, 2, 2)
+            p.drawEllipse(13, 11, 2, 2)
+        else:
+            p.setPen(QPen(color, 2))
+            p.drawLine(8, 9, 14, 15)
+            p.drawLine(14, 9, 8, 15)
+
+        p.end()
+        pix.setDevicePixelRatio(scale)
+        return pix
+
+    icon = QIcon(_render(1.0))
+    icon.setIsMask(True)  # Tell macOS to treat as template image
+    icon.addPixmap(_render(2.0))  # Retina
+    return icon
 
 
 class VPNTrayIcon(QObject):
@@ -38,20 +95,27 @@ class VPNTrayIcon(QObject):
         self._current_status = STATUS_DISCONNECTED
         self._current_connection: Optional[str] = None
         self._connections: dict = {}
+        self._is_macos = platform.system() == "Darwin"
 
-        # Load icons
-        self._icons = {
-            STATUS_DISCONNECTED: get_icon("vpn-disconnected"),
-            STATUS_CONNECTING: get_icon("vpn-connecting"),
-            STATUS_CONNECTED: get_icon("vpn-connected"),
-        }
-
-        # Set app icon as fallback if no icons available
-        app_icon = get_icon("app-icon")
-        if not app_icon.isNull():
-            for status in [STATUS_DISCONNECTED, STATUS_CONNECTING, STATUS_CONNECTED]:
-                if self._icons[status].isNull():
-                    self._icons[status] = app_icon
+        # Load icons — programmatic template icons on macOS for proper menu bar rendering,
+        # SVG resources elsewhere.
+        if self._is_macos:
+            self._icons = {
+                STATUS_DISCONNECTED: _create_macos_template_icon(STATUS_DISCONNECTED),
+                STATUS_CONNECTING: _create_macos_template_icon(STATUS_CONNECTING),
+                STATUS_CONNECTED: _create_macos_template_icon(STATUS_CONNECTED),
+            }
+        else:
+            self._icons = {
+                STATUS_DISCONNECTED: get_icon("vpn-disconnected"),
+                STATUS_CONNECTING: get_icon("vpn-connecting"),
+                STATUS_CONNECTED: get_icon("vpn-connected"),
+            }
+            app_icon = get_icon("app-icon")
+            if not app_icon.isNull():
+                for status in [STATUS_DISCONNECTED, STATUS_CONNECTING, STATUS_CONNECTED]:
+                    if self._icons[status].isNull():
+                        self._icons[status] = app_icon
 
         self._setup_menu()
         self._update_icon()

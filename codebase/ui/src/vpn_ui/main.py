@@ -4,8 +4,7 @@ import sys
 import time
 from typing import Optional
 
-from PyQt6.QtCore import QCoreApplication, QTimer
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import QTimer
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from vpn_ui.constants import (
@@ -63,10 +62,32 @@ class VPNApplication:
         self._settings_dialog: Optional[SettingsDialog] = None
         self._disconnecting: bool = False  # Flag to suppress errors during disconnect
 
-        # Check system tray availability
+        # Tray and notifications are created in _startup() after the Qt event
+        # loop is running — on macOS, instantiating QSystemTrayIcon before
+        # exec() can crash when launched from Finder.
+        self.tray: Optional[VPNTrayIcon] = None
+        self.notifications: Optional[NotificationManager] = None
+
+    def run(self) -> int:
+        """Run the application.
+
+        Returns:
+            Exit code
+        """
+        QTimer.singleShot(0, self._startup)
+        return self.app.exec()
+
+    def _startup(self) -> None:
+        """Initialize UI after the event loop starts."""
         if not VPNTrayIcon.is_system_tray_available():
-            if sys.platform != "darwin":
-                # Only show warning on non-macOS (macOS always has menu bar)
+            if sys.platform == "darwin":
+                QMessageBox.warning(
+                    None,
+                    "Menu Bar Not Available",
+                    "The menu bar status area is not available.\n\n"
+                    "The application will still run but won't show a tray icon."
+                )
+            else:
                 QMessageBox.warning(
                     None,
                     "System Tray Not Available",
@@ -76,66 +97,51 @@ class VPNApplication:
                     "The application will still work but won't show a tray icon."
                 )
 
-        # Create tray icon
         self.tray = VPNTrayIcon()
-
-        # Create notification manager
         self.notifications = NotificationManager(self.tray.tray)
 
-        # Connect signals
         self.tray.connect_requested.connect(self._on_connect_requested)
         self.tray.disconnect_requested.connect(self._on_disconnect_requested)
         self.tray.settings_requested.connect(self._show_settings)
         self.tray.quit_requested.connect(self._quit)
 
-        # Load connections into tray menu
         self._update_connections_menu()
 
         # Check current connection status
         if self.backend.is_connected():
-            # Try to get the connection name from state file
             active_conn = self.backend.get_active_connection()
             if active_conn:
                 self._current_connection = active_conn
                 self.tray.set_status(STATUS_CONNECTED, active_conn)
             else:
-                # Try to infer from openconnect process arguments
                 inferred = self.backend.infer_connection_name()
                 if inferred:
                     self._current_connection = inferred
                     self.backend.save_active_connection(inferred)
                     self.tray.set_status(STATUS_CONNECTED, inferred)
                 else:
-                    # Connected externally (via CLI), can't determine the name
                     self.tray.set_status(STATUS_CONNECTED, "Unknown")
         else:
-            # Not connected - clear any stale state
             self.backend.clear_active_connection()
 
-    def run(self) -> int:
-        """Run the application.
-
-        Returns:
-            Exit code
-        """
-        # Show tray icon
         self.tray.show()
-
-        # Start status polling
         self.tray.start_status_polling()
+        QTimer.singleShot(1000, self._ensure_tray_visible)
 
-        # If no connections exist, show settings dialog
         connections = self.backend.get_connections()
         if not connections:
             self._show_settings()
 
-        # Run event loop
-        return self.app.exec()
+    def _ensure_tray_visible(self) -> None:
+        """Retry tray visibility to handle delayed system tray availability."""
+        if self.tray and not self.tray.is_visible():
+            self.tray.show()
 
     def _update_connections_menu(self) -> None:
         """Update the connections menu in the tray."""
         connections = self.backend.get_connections()
-        self.tray.update_connections(connections)
+        if self.tray:
+            self.tray.update_connections(connections)
 
     def _show_settings(self) -> None:
         """Show the settings dialog."""
@@ -184,7 +190,8 @@ class VPNApplication:
 
         self._current_connection = connection_name
         self.tray.set_status(STATUS_CONNECTING, connection_name)
-        self.notifications.connecting(connection_name)
+        if self.notifications:
+            self.notifications.connecting(connection_name)
 
         # Create and start worker thread
         self._worker_thread = create_connect_thread(
@@ -309,13 +316,14 @@ class VPNApplication:
 
         if success:
             self.tray.set_status(STATUS_CONNECTED, self._current_connection)
-            self.notifications.connected(self._current_connection)
+            if self.notifications:
+                self.notifications.connected(self._current_connection)
             # Save active connection to state file
             self.backend.save_active_connection(self._current_connection)
         else:
             self.tray.set_status(STATUS_DISCONNECTED)
             # Only show error if not intentionally disconnecting
-            if not self._disconnecting:
+            if not self._disconnecting and self.notifications:
                 self.notifications.error(message)
             self._current_connection = None
             self.backend.clear_active_connection()
@@ -332,7 +340,7 @@ class VPNApplication:
 
         self._disconnecting = False  # Clear flag
         self.tray.set_status(STATUS_DISCONNECTED)
-        if success:
+        if success and self.notifications:
             self.notifications.disconnected()
         # Don't show error on disconnect - it's intentional
         self._current_connection = None
@@ -349,7 +357,8 @@ class VPNApplication:
         if self._disconnecting:
             print(f"[Suppressed during disconnect] {error}")
             return
-        self.notifications.error(error)
+        if self.notifications:
+            self.notifications.error(error)
         print(f"[Error] {error}")
 
     def _quit(self) -> None:
@@ -372,10 +381,9 @@ class VPNApplication:
                 self.backend.disconnect(force=False)
 
         # Stop status polling
-        self.tray.stop_status_polling()
-
-        # Hide tray
-        self.tray.hide()
+        if self.tray:
+            self.tray.stop_status_polling()
+            self.tray.hide()
 
         # Quit application
         self.app.quit()
