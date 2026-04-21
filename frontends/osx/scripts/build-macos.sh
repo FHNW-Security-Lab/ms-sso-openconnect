@@ -253,9 +253,32 @@ chmod +x "$SCRIPTS_DIR/preinstall"
 echo ""
 echo "=== Building Package ==="
 
+# Pin the app bundle to /Applications so macOS Installer cannot "relocate"
+# the install into any other copy of the bundle it finds on disk (e.g. a
+# stale dev build under the repo).
+cat > "$BUILD_DIR/component.plist" << 'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+    <dict>
+        <key>BundleIsRelocatable</key>
+        <false/>
+        <key>BundleIsVersionChecked</key>
+        <true/>
+        <key>BundleOverwriteAction</key>
+        <string>upgrade</string>
+        <key>RootRelativeBundlePath</key>
+        <string>Applications/MS SSO OpenConnect.app</string>
+    </dict>
+</array>
+</plist>
+PLIST
+
 # Build component package
 pkgbuild \
     --root "$PKG_ROOT" \
+    --component-plist "$BUILD_DIR/component.plist" \
     --scripts "$SCRIPTS_DIR" \
     --identifier "com.github.ms-sso-openconnect" \
     --version "$VERSION" \
