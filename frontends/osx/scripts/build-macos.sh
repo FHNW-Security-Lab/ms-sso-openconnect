@@ -8,7 +8,7 @@ REPO_ROOT="$FRONTEND_DIR/../.."
 CODEBASE_UI_DIR="$REPO_ROOT/codebase/ui"
 CORE_DIR="$REPO_ROOT/codebase/core"
 DAEMON_SRC_DIR="$REPO_ROOT/frontends/osx/daemon"
-VERSION="${1:-2.1.3}"
+VERSION="${1:-2.1.4}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Usage: $0 [version]"
@@ -299,6 +299,11 @@ cat > "$BUILD_DIR/Distribution.xml" << DISTRIBUTION
         <pkg-ref id="com.github.ms-sso-openconnect"/>
     </choice>
     <pkg-ref id="com.github.ms-sso-openconnect" version="${VERSION}">ms-sso-openconnect-component.pkg</pkg-ref>
+    <pkg-ref id="com.github.ms-sso-openconnect">
+        <must-close>
+            <app id="com.github.ms-sso-openconnect-ui"/>
+        </must-close>
+    </pkg-ref>
 </installer-gui-script>
 DISTRIBUTION
 

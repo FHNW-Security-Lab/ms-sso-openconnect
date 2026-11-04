@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TARGET="${1:-help}"
-VERSION="${2:-2.1.3}"
+VERSION="${2:-2.1.4}"
 
 case "$TARGET" in
     appimage)

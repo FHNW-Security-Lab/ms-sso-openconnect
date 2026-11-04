@@ -17,6 +17,10 @@ request administrator approval. The app runs as your normal user; only the
 helper manages the privileged OpenConnect process. The helper includes its own
 Python runtime and starts automatically through `launchd`.
 
+The installer requires the running menu bar app to close before an update.
+After installation, launch it again from Applications so the new version is
+loaded. Replacing the app's files alone does not update an already-running app.
+
 If the app says the helper is unavailable or needs updating, reinstall the
 current package. Installation checks that the helper responds before reporting
 success. The app does not fall back to an administrator password dialog or keep
@@ -47,7 +51,7 @@ Use the canonical build wrapper:
 ```
 
 Artifacts are collected in `dist/osx/pkg/` with the architecture in the filename,
-for example `MS-SSO-OpenConnect-2.1.3-macos-arm64.pkg`. Build with a Python
+for example `MS-SSO-OpenConnect-2.1.4-macos-arm64.pkg`. Build with a Python
 interpreter matching the Mac's architecture; the output is not a universal
 Intel/Apple Silicon package.
 
@@ -57,7 +61,7 @@ example, with uv installed:
 
 ```bash
 uv python install 3.13
-PYTHON_BIN="$(uv python find --managed-python 3.13)" ./frontends/osx/build.sh 2.1.3
+PYTHON_BIN="$(uv python find --managed-python 3.13)" ./frontends/osx/build.sh 2.1.4
 ```
 
 The minimum macOS version is inferred from the native binaries in the app and
@@ -69,6 +73,12 @@ The current builder produces an unsigned, unnotarized installer. PyInstaller use
 ad-hoc code signatures, and the completed app is sealed again after Chromium is
 added. These signatures provide integrity checks; they are not Developer ID
 signatures.
+
+Validate an existing installer without installing it:
+
+```bash
+MS_SSO_TEST_PKG=/path/to/package.pkg python3 -m unittest discover -s tests -p test_macos_packaging.py
+```
 
 ## Implementation Source
 

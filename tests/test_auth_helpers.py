@@ -400,6 +400,11 @@ class BrowserUiRecoveryTests(unittest.TestCase):
         self.assertTrue(
             _gp_initial_password_observation_required(**common)
         )
+        self.assertTrue(
+            _gp_initial_password_observation_required(
+                **(common | {"recovery_attempts": 1})
+            )
+        )
         self.assertFalse(
             _gp_initial_password_observation_required(
                 **(
@@ -468,7 +473,6 @@ class BrowserUiRecoveryTests(unittest.TestCase):
         for name, override in {
             "fhnw-unchanged": {"protocol": "anyconnect"},
             "discovery-complete": {"discovery_completed": True},
-            "after-recovery": {"recovery_attempts": 1},
             "after-action": {"password_action_attempts": 1},
             "already-dispatched": {"password_dispatched": True},
             "not-observed": {"observation_started": False},

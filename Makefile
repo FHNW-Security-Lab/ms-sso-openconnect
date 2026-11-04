@@ -1,4 +1,4 @@
-VERSION ?= 2.1.3
+VERSION ?= 2.1.4
 
 .PHONY: help appimage deb linux-all pkg nix nix-core nix-ui
 
