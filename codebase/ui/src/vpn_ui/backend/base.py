@@ -3,6 +3,15 @@
 from typing import Optional, Protocol, runtime_checkable
 
 
+class VPNConnectionError(RuntimeError):
+    """A safe connection diagnostic with an explicit retry policy."""
+
+    def __init__(self, message: str, *, retryable: bool = False, error_code: str = ""):
+        super().__init__(message)
+        self.retryable = retryable
+        self.error_code = error_code
+
+
 @runtime_checkable
 class VPNBackendProtocol(Protocol):
     """Protocol defining the VPN backend interface.

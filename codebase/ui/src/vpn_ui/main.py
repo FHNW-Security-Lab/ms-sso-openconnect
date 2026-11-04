@@ -180,7 +180,11 @@ class VPNApplication:
             if reply != QMessageBox.StandardButton.Yes:
                 return
             # Disconnect first
-            self._disconnect_sync()
+            try:
+                self._disconnect_sync()
+            except RuntimeError as exc:
+                self._on_error(str(exc))
+                return
 
         # Clear stale state before a new connect so tray polling cannot revive
         # a previous connection label during handover.
@@ -394,7 +398,10 @@ class VPNApplication:
         print(f"[Error] {error}")
 
     def _quit(self) -> None:
-        if self.backend.is_connected() or (self._worker_thread and self._worker_thread.isRunning()):
+        needs_disconnect = self.backend.is_connected() or (
+            self._worker_thread is not None and self._worker_thread.isRunning()
+        )
+        if needs_disconnect:
             reply = QMessageBox.question(
                 None, "Quit", "Disconnect the VPN and quit?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
@@ -404,7 +411,12 @@ class VPNApplication:
         self._quitting = True
         self.tray.stop_status_polling()
         self.tray.hide()
-        self._on_disconnect_requested(False)
+        if needs_disconnect:
+            self._on_disconnect_requested(False)
+        else:
+            # An idle app must remain quittable when its helper is unavailable.
+            self._cleanup_worker_thread()
+            self._reap_threads()
         # _reap_threads quits only after both authentication and tunnel teardown.
 
 

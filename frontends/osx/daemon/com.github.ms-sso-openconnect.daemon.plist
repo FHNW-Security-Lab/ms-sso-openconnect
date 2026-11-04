@@ -9,7 +9,7 @@
     <!-- Program to run (installed by pkg) -->
     <key>ProgramArguments</key>
     <array>
-        <string>/Library/PrivilegedHelperTools/ms-sso-openconnect-daemon</string>
+        <string>/Library/PrivilegedHelperTools/ms-sso-openconnect/ms-sso-openconnect-daemon</string>
     </array>
 
     <!-- Run as root -->
@@ -23,6 +23,10 @@
     <!-- Keep the daemon running (restart if it crashes) -->
     <key>KeepAlive</key>
     <true/>
+
+    <!-- Allow the helper to wait for OpenConnect's route/DNS cleanup. -->
+    <key>ExitTimeOut</key>
+    <integer>30</integer>
 
     <!-- Log files -->
     <key>StandardOutPath</key>

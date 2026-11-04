@@ -1,6 +1,35 @@
 # macOS Frontend
 
-This frontend is the Qt menu bar app with macOS daemon packaging (`.pkg`).
+This frontend is the Qt menu bar app with macOS helper packaging (`.pkg`).
+
+## Install and connect
+
+Install OpenConnect separately, then open the `.pkg` and launch **MS SSO
+OpenConnect** from Applications:
+
+```bash
+brew install openconnect
+```
+
+Administrator approval is required when installing or updating the package.
+Connecting and disconnecting use the installed background helper and do not
+request administrator approval. The app runs as your normal user; only the
+helper manages the privileged OpenConnect process. The helper includes its own
+Python runtime and starts automatically through `launchd`.
+
+If the app says the helper is unavailable or needs updating, reinstall the
+current package. Installation checks that the helper responds before reporting
+success. The app does not fall back to an administrator password dialog or keep
+retrying a broken helper. Microsoft sign-in, MFA, and Keychain access are separate
+from administrator approval and may still require interaction.
+
+For a GlobalProtect profile that authenticates directly at its gateway, choose
+**GP Authentication → Direct gateway** in the connection settings. This is the
+mode used by direct UniBas gateway profiles in the Linux plugin. Use **Portal**
+when the deployment requires portal discovery. The selected mode applies to both
+browser authentication and the subsequent VPN connection; a gateway prelogin
+cookie is not reused for reconnects. Leave **GP OS Version** empty for automatic
+OS reporting unless the gateway requires an explicit compatibility value.
 
 ## Build
 
@@ -10,7 +39,29 @@ Use the canonical build wrapper:
 ./frontends/osx/build.sh [version]
 ```
 
-Artifacts are collected in `dist/osx/pkg/`.
+Artifacts are collected in `dist/osx/pkg/` with the architecture in the filename,
+for example `MS-SSO-OpenConnect-2.1.1-macos-arm64.pkg`. Build with a Python
+interpreter matching the Mac's architecture; the output is not a universal
+Intel/Apple Silicon package.
+
+The builder uses `python3` by default. Set `PYTHON_BIN` to use a portable Python
+runtime instead of a Homebrew Python built for a recent macOS version. For
+example, with uv installed:
+
+```bash
+uv python install 3.13
+PYTHON_BIN="$(uv python find --managed-python 3.13)" ./frontends/osx/build.sh 2.1.1
+```
+
+The minimum macOS version is inferred from the native binaries in the app and
+helper, including Python, Qt, and Chromium. It is written to both the app metadata
+and installer requirements. A portable Python can reduce that minimum, but other
+bundled dependencies may require a newer macOS version.
+
+The current builder produces an unsigned, unnotarized installer. PyInstaller uses
+ad-hoc code signatures, and the completed app is sealed again after Chromium is
+added. These signatures provide integrity checks; they are not Developer ID
+signatures.
 
 ## Implementation Source
 

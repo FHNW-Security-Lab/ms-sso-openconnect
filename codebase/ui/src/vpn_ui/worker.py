@@ -7,6 +7,7 @@ import time
 from typing import Optional, TYPE_CHECKING
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
+from vpn_ui.backend.base import VPNConnectionError
 
 if TYPE_CHECKING:
     from vpn_ui.backend.base import VPNBackendProtocol
@@ -97,6 +98,7 @@ class VPNConnectWorker(QObject):
                                  or not cached[0].get("portal-userauthcookie")):
             cached = None
         attempt = 0
+        last_connection_error = None
         self._connected_at = None
         while not attempts or attempt < attempts:
             if self._cancelled.is_set():
@@ -104,7 +106,10 @@ class VPNConnectWorker(QObject):
             if attempt:
                 wait = min(300, delay * (2 ** min(attempt - 1, 10)))
                 budget = f"/{attempts}" if attempts else ""
-                self.progress.emit(f"Connection lost or expired. Reconnecting ({attempt + 1}{budget}) in {wait}s...")
+                message = f"Connection lost or expired. Reconnecting ({attempt + 1}{budget}) in {wait}s..."
+                if last_connection_error:
+                    message += f" {last_connection_error}"
+                self.progress.emit(message)
                 if self._cancelled.wait(wait):
                     break
             candidates = [cached, None] if cached else [None]
@@ -112,6 +117,12 @@ class VPNConnectWorker(QObject):
             for candidate in candidates:
                 if self._cancelled.is_set():
                     break
+                if sys.platform == "darwin":
+                    # Installation authorizes the helper once. Never start sign-in or
+                    # replay authentication when that helper needs attention.
+                    self.backend.ensure_helper_available()
+                    if self._cancelled.is_set():
+                        break
                 if candidate:
                     cookies, group = candidate
                     self.progress.emit("Trying saved session...")
@@ -144,18 +155,27 @@ class VPNConnectWorker(QObject):
                 self.progress.emit(f"Establishing VPN tunnel to {name}...")
                 kwargs = dict(address=address, protocol=protocol, cookies=cookies,
                               no_dtls=self.no_dtls, username=username, allow_fallback=True,
-                              connection_name=name, cached_usergroup=group)
+                              connection_name=name, cached_usergroup=group,
+                              gp_auth_interface=gp_interface,
+                              gp_os_version=options.get("gp_os_version") or None,
+                              cancel_callback=self._cancelled.is_set)
                 if sys.platform != "darwin":
-                    kwargs.update(cancel_callback=self._cancelled.is_set,
-                                  disconnect_force_callback=lambda: self._cancel_force,
+                    kwargs.update(disconnect_force_callback=lambda: self._cancel_force,
                                   connected_callback=lambda: self._connected(name),
-                                  progress_callback=self.progress.emit,
-                                  gp_auth_interface=gp_interface,
-                                  gp_os_version=options.get("gp_os_version") or None)
-                stopped = self.backend.connect_vpn(**kwargs)
+                                  progress_callback=self.progress.emit)
+                try:
+                    stopped = self.backend.connect_vpn(**kwargs)
+                except VPNConnectionError as exc:
+                    if not exc.retryable:
+                        raise
+                    last_connection_error = str(exc)
+                    self.progress.emit(last_connection_error)
+                    stopped = False
                 if sys.platform == "darwin" and stopped:
+                    last_connection_error = None
                     self._connected(name)
-                    while self.backend.is_connected() and not self._cancelled.wait(1):
+                    while (self.backend.is_connected(require_helper=True)
+                           and not self._cancelled.wait(1)):
                         pass
                     stopped = self._cancelled.is_set()
                 if stopped or self._cancelled.is_set():
@@ -171,8 +191,10 @@ class VPNConnectWorker(QObject):
                     break
             else:
                 attempt += 1
-        self.finished.emit(False, "Cancelled" if self._cancelled.is_set()
-                           else f"VPN connection failed after {attempts} attempts")
+        message = f"VPN connection failed after {attempts} attempts"
+        if last_connection_error:
+            message += f": {last_connection_error}"
+        self.finished.emit(False, "Cancelled" if self._cancelled.is_set() else message)
 
 
 class VPNDisconnectWorker(QObject):
