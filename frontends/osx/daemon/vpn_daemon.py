@@ -21,12 +21,15 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
-DAEMON_VERSION = "1.1.0"
+import network_policy
+
+DAEMON_VERSION = "1.2.0"
 SOCKET_PATH = "/var/run/ms-sso-openconnect/daemon.sock"
 PID_FILE = "/var/run/ms-sso-openconnect/daemon.pid"
 MAX_MESSAGE_BYTES = 1024 * 1024
 CONNECT_TIMEOUT = 45
 HIP_WRAPPER_PATH = "/Library/PrivilegedHelperTools/ms-sso-openconnect/ms-sso-hip-report"
+NETWORK_WRAPPER_PATH = "/Library/PrivilegedHelperTools/ms-sso-openconnect/ms-sso-vpnc-script"
 OPENCONNECT_PATHS = [
     "/opt/homebrew/bin/openconnect",
     "/usr/local/bin/openconnect",
@@ -165,6 +168,8 @@ class VPNDaemon:
         self._stopping = asyncio.Event()
         self._connect_cancel = None
         self._connecting = False
+        self._network_session = None
+        self._process_watcher = None
 
     async def handle_client(self, reader, writer):
         req_id = None
@@ -231,9 +236,13 @@ class VPNDaemon:
         if not openconnect_bin:
             return {"success": False, "message": "OpenConnect is not installed in a standard location",
                     "retryable": False, "error_code": "openconnect_missing"}
+        if not os.access(NETWORK_WRAPPER_PATH, os.X_OK):
+            return {"success": False, "retryable": False, "error_code": "network_support_missing",
+                    "message": "VPN network support is unavailable; reinstall the macOS package"}
         protocol = params.get("protocol", "anyconnect")
         cmd = [openconnect_bin, "--protocol=" + protocol, "--non-inter",
-               "--reconnect-timeout=300", "--force-dpd=" + ("10" if protocol == "gp" else "30")]
+               "--reconnect-timeout=300", "--force-dpd=" + ("10" if protocol == "gp" else "30"),
+               "--script=" + NETWORK_WRAPPER_PATH]
         username = params.get("username")
         env = os.environ.copy()
         if protocol == "gp":
@@ -254,6 +263,13 @@ class VPNDaemon:
             if self._openconnect_proc and self._openconnect_proc.poll() is None:
                 return {"success": False, "message": "A VPN connection is already active",
                         "retryable": False, "error_code": "already_connected"}
+            if not await self._cleanup_network():
+                return self._network_error("network_cleanup_failed")
+            try:
+                self._network_session = await asyncio.to_thread(network_policy.new_session)
+            except network_policy.NetworkPolicyError:
+                return self._network_error("network_setup_failed")
+            env["MS_SSO_NETWORK_SESSION"] = self._network_session
             try:
                 # The unlinked file has owner-only permissions and no pipe
                 # capacity limit. The child inherits only the open descriptor.
@@ -263,15 +279,22 @@ class VPNDaemon:
                     process = subprocess.Popen(cmd, stdin=secret, stdout=subprocess.PIPE,
                                                stderr=subprocess.STDOUT, env=env)
             except (OSError, subprocess.SubprocessError):
+                await self._cleanup_network()
                 return {"success": False, "retryable": False, "error_code": "openconnect_start_failed",
                         "message": "OpenConnect could not be started"}
             self._openconnect_proc = process
+            try:
+                await asyncio.to_thread(network_policy.bind_session, self._network_session, process.pid)
+            except network_policy.NetworkPolicyError:
+                await self._stop_owned_process()
+                return self._network_error("network_setup_failed")
             self._connect_cancel = cancelled = threading.Event()
             self._connecting = True
             self._current_connection = None
             ready = threading.Event()
             threading.Thread(target=self._consume_output, args=(process.stdout, ready),
                              daemon=True, name="openconnect-output").start()
+            self._process_watcher = asyncio.create_task(self._watch_process(process))
 
         # Do not hold the lifecycle lock while waiting: Disconnect must be able
         # to cancel a slow portal/gateway negotiation without another prompt.
@@ -287,11 +310,27 @@ class VPNDaemon:
                     if self._openconnect_proc is process:
                         self._openconnect_proc = None
                         self._connecting = False
+                        await self._cleanup_network()
                 return {"success": False, "retryable": True, "error_code": "openconnect_exit",
                         "message": "OpenConnect exited before the VPN tunnel was ready", "exit_status": code}
-            if ready.is_set():
-                async with self._lifecycle_lock:
-                    if self._openconnect_proc is process and not cancelled.is_set():
+            token = self._network_session
+            protected = False
+            try:
+                # Policy inspection may wait for the script. Never prevent
+                # Disconnect from signaling the child while these reads run.
+                failed = await asyncio.to_thread(network_policy.session_failure, token)
+                if ready.is_set() and not failed:
+                    protected = await asyncio.to_thread(network_policy.session_ready, token)
+            except network_policy.NetworkPolicyError:
+                failed = True
+            async with self._lifecycle_lock:
+                if self._openconnect_proc is process and not cancelled.is_set():
+                    if failed:
+                        await self._stop_owned_process()
+                        return self._network_error("network_setup_failed")
+                    # OpenConnect prints Configured before its script and
+                    # ignores script failures. Wait for the verified ACK too.
+                    if protected:
                         self._connecting = False
                         self._current_connection = params.get("connection_name") or params["address"]
                         return {"success": True, "message": "Connected"}
@@ -299,8 +338,52 @@ class VPNDaemon:
         async with self._lifecycle_lock:
             if self._openconnect_proc is process:
                 await self._stop_owned_process()
+        if ready.is_set():
+            return self._network_error("network_setup_failed")
         return {"success": False, "retryable": True, "error_code": "openconnect_timeout",
                 "message": "VPN tunnel did not become ready in time"}
+
+    @staticmethod
+    def _network_error(code):
+        return {"success": False, "retryable": False, "error_code": code,
+                "message": "VPN network settings could not be safely applied or restored; reconnect or reinstall the macOS package"}
+
+    async def _cleanup_network(self):
+        if self._network_session:
+            try:
+                await asyncio.to_thread(network_policy.cleanup_session, self._network_session)
+            except network_policy.NetworkPolicyError:
+                return False
+            self._network_session = None
+        return True
+
+    async def _watch_process(self, process):
+        # Unexpected exits must restore networking even if the UI is closed.
+        while process.poll() is None:
+            await asyncio.sleep(0.5)
+            if self._openconnect_proc is not process:
+                return
+            token = self._network_session
+            try:
+                failed = await asyncio.to_thread(network_policy.session_failure, token)
+            except network_policy.NetworkPolicyError:
+                failed = True
+            async with self._lifecycle_lock:
+                if self._openconnect_proc is not process:
+                    return
+                if failed:
+                    # Reconnect scripts can fail after initial readiness too.
+                    # Keep protection until this owned child actually exits.
+                    self._connecting = True
+                    await self._stop_owned_process()
+                    if self._openconnect_proc is not process:
+                        return
+        async with self._lifecycle_lock:
+            if self._openconnect_proc is process:
+                self._openconnect_proc = None
+                self._connecting = False
+                self._current_connection = None
+                await self._cleanup_network()
 
     @staticmethod
     def _consume_output(stream, ready):
@@ -338,6 +421,8 @@ class VPNDaemon:
         self._openconnect_proc = None
         self._current_connection = None
         self._connecting = False
+        if not await self._cleanup_network():
+            return self._network_error("network_cleanup_failed")
         return {"success": True, "message": "Disconnected"}
 
     async def _handle_status(self, params):
@@ -347,7 +432,7 @@ class VPNDaemon:
                     "pid": self._openconnect_proc.pid}
         return {"connected": False, "connection_name": None, "pid": None}
 
-    def _signal_handler(self, signum, frame):
+    def _signal_handler(self, signum, frame=None):
         self._running = False
         self._stopping.set()
 
@@ -358,10 +443,12 @@ class VPNDaemon:
         os.chmod(path, 0o666)
 
     async def run(self):
-        signal.signal(signal.SIGTERM, self._signal_handler)
-        signal.signal(signal.SIGINT, self._signal_handler)
+        loop = asyncio.get_running_loop()
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(signum, self._signal_handler, signum)
         socket_path, pid_path = Path(SOCKET_PATH), Path(PID_FILE)
         socket_path.parent.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(network_policy.cleanup_stale_sessions)
         socket_path.unlink(missing_ok=True)
         pid_path.write_text(str(os.getpid()))
         try:
@@ -405,6 +492,8 @@ def check_helper(path=SOCKET_PATH):
 def main():
     if sys.argv[1:2] == ["--hip-report"]:
         return run_hip_report(sys.argv[2:])
+    if sys.argv[1:] == ["--network-script"]:
+        return network_policy.run_network_script()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="Check the installed helper without elevation")
     parser.add_argument("--version", action="version", version=DAEMON_VERSION)

@@ -26,6 +26,9 @@ CONNECTION_ERRORS = {
     "already_connected": "A VPN connection is already active",
     "openconnect_missing": "OpenConnect is not installed in a standard location",
     "hip_support_missing": "OpenConnect HIP report support is unavailable; reinstall OpenConnect",
+    "network_support_missing": "VPN network support is unavailable; reinstall the macOS package",
+    "network_setup_failed": "VPN routing or DNS could not be safely configured. The connection was stopped; try reconnecting.",
+    "network_cleanup_failed": "VPN network settings could not be fully restored. Try disconnecting again.",
     "openconnect_exit": "OpenConnect exited before the VPN tunnel was ready",
     "openconnect_start_failed": "OpenConnect could not be started",
     "openconnect_timeout": "VPN tunnel did not become ready in time",
@@ -117,7 +120,7 @@ class VPNBackend(SharedBackendMixin):
             version = re.fullmatch(
                 r"(\d+)\.(\d+)\.(\d+)(?:[-+][\w.-]+)?", str(result.get("version", "")),
             )
-            if version is None or tuple(map(int, version.groups())) < (1, 1, 0):
+            if version is None or tuple(map(int, version.groups())) < (1, 2, 0):
                 raise MacOSHelperUnavailable(
                     "The installed macOS VPN helper needs an update. Install the latest macOS "
                     "package, then try again. Administrator approval is only required during installation."

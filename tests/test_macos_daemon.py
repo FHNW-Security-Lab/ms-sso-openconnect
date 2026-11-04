@@ -8,14 +8,20 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('macos_daemon_under_test', ROOT / 'frontends/osx/daemon/vpn_daemon.py')
 daemon_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(daemon_module)
+sys.path.insert(0, str(ROOT / 'frontends/osx/daemon'))
+try:
+    spec.loader.exec_module(daemon_module)
+finally:
+    sys.path.pop(0)
 
 
 def connection(**options):
@@ -46,6 +52,16 @@ class Process:
 class DaemonConnectionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.daemon = daemon_module.VPNDaemon()
+        self.network = {}
+        for name, value in [('new_session', 'a' * 32), ('bind_session', None),
+                            ('session_ready', True), ('session_failure', None),
+                            ('cleanup_session', None)]:
+            patcher = patch.object(daemon_module.network_policy, name, return_value=value)
+            self.network[name] = patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = patch.object(daemon_module.os, 'access', return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     async def connect(self, params=None, process=None):
         process = process or Process()
@@ -76,6 +92,87 @@ class DaemonConnectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(secret, ' '.join(captured['argv']) + stdout.getvalue() + stderr.getvalue())
         self.assertEqual(captured['options']['stdout'], subprocess.PIPE)
         self.assertTrue(captured['options']['stdin'].closed)
+        self.assertIn('--script=' + daemon_module.NETWORK_WRAPPER_PATH, captured['argv'])
+        self.assertEqual(captured['options']['env']['MS_SSO_NETWORK_SESSION'], 'a' * 32)
+
+    async def test_output_marker_without_network_ack_is_never_connected(self):
+        self.network['session_ready'].return_value = False
+        process = Process()
+        with patch.object(daemon_module, 'CONNECT_TIMEOUT', 0.02):
+            result, _ = await self.connect(process=process)
+        self.assertEqual(result['error_code'], 'network_setup_failed')
+        self.assertEqual(process.signals, [signal.SIGTERM])
+        self.network['cleanup_session'].assert_called_with('a' * 32)
+        self.assertFalse((await self.daemon._dispatch('status', {}))['connected'])
+
+    async def test_marker_before_network_script_waits_for_verified_ack(self):
+        self.network['session_ready'].side_effect = [False, False, True]
+        result, _ = await self.connect()
+        self.assertTrue(result['success'])
+        self.assertEqual(self.network['session_ready'].call_count, 3)
+
+    async def test_disconnect_can_signal_during_network_verification(self):
+        entered, release = threading.Event(), threading.Event()
+        def verify(token):
+            entered.set()
+            release.wait(2)
+            return True
+        self.network['session_ready'].side_effect = verify
+        process = Process()
+        task = asyncio.create_task(self.connect(process=process))
+        try:
+            self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+            disconnected = await asyncio.wait_for(self.daemon._dispatch('disconnect', {}), 0.5)
+            self.assertTrue(disconnected['success'])
+            self.assertEqual(process.signals, [signal.SIGTERM])
+        finally:
+            release.set()
+            result, _ = await task
+        self.assertEqual(result['error_code'], 'connection_cancelled')
+
+    async def test_script_failure_stops_connection_without_waiting_for_marker(self):
+        self.network['session_failure'].return_value = 'network_setup_failed'
+        process = Process(b'Negotiating\n')
+        result, _ = await self.connect(process=process)
+        self.assertEqual(result['error_code'], 'network_setup_failed')
+        self.assertEqual(process.signals, [signal.SIGTERM])
+
+    async def test_failed_child_binding_stops_only_new_child(self):
+        self.network['bind_session'].side_effect = daemon_module.network_policy.NetworkPolicyError('unsafe')
+        process = Process()
+        result, _ = await self.connect(process=process)
+        self.assertEqual(result['error_code'], 'network_setup_failed')
+        self.assertEqual(process.signals, [signal.SIGTERM])
+        self.network['cleanup_session'].assert_called_once()
+
+    async def test_unexpected_exit_restores_network_without_ui_polling(self):
+        process = Process()
+        result, _ = await self.connect(process=process)
+        self.assertTrue(result['success'])
+        process.exit_status = 1
+        await asyncio.wait_for(self.daemon._process_watcher, 1)
+        self.network['cleanup_session'].assert_called_once_with('a' * 32)
+        self.assertIsNone(self.daemon._network_session)
+
+    async def test_failed_network_cleanup_retains_token_for_retry(self):
+        self.daemon._network_session = 'a' * 32
+        self.network['cleanup_session'].side_effect = daemon_module.network_policy.NetworkPolicyError('conflict')
+        result = await self.daemon._dispatch('disconnect', {})
+        self.assertEqual(result['error_code'], 'network_cleanup_failed')
+        self.assertEqual(self.daemon._network_session, 'a' * 32)
+        self.network['cleanup_session'].side_effect = None
+        self.assertTrue((await self.daemon._dispatch('disconnect', {}))['success'])
+        self.assertIsNone(self.daemon._network_session)
+
+    async def test_reconnect_script_failure_stops_an_established_connection(self):
+        process = Process()
+        result, _ = await self.connect(process=process)
+        self.assertTrue(result['success'])
+        self.network['session_failure'].return_value = 'network_setup_failed'
+        await asyncio.wait_for(self.daemon._process_watcher, 2)
+        self.assertEqual(process.signals, [signal.SIGTERM])
+        self.network['cleanup_session'].assert_called_once()
+        self.assertFalse((await self.daemon._dispatch('status', {}))['connected'])
 
     async def test_gateway_uses_prelogin_identity_and_mac_hip_options(self):
         params = connection(protocol='gp', username='login@example.test', gp_auth_interface='gateway',

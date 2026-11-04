@@ -42,6 +42,23 @@ The profile's automatic reconnect setting continues to apply. **Connect with
 browser** and the error dialog's **Retry with browser** start a single explicit
 sign-in attempt without reusing saved VPN cookies.
 
+For an IPv4 full-tunnel connection whose gateway supplies no full IPv6 tunnel,
+the helper installs temporary IPv6 reject routes so ordinary Internet traffic
+falls back to the VPN's IPv4 connection. Advertised VPN DNS servers handle
+general lookups unless the server explicitly requests split DNS. Search domains
+are preserved. These settings belong to the VPN session and are removed on
+disconnect; saved Wi-Fi DNS and IPv6 settings are not changed.
+
+The helper verifies its routes and DNS before reporting a successful connection,
+and removes its owned IPv6 protection and DNS entry after an unexpected
+OpenConnect exit or helper restart. Normal disconnect also runs OpenConnect's
+ordinary tunnel-route cleanup. Crash recovery does not replay that cleanup
+against a potentially reused tunnel interface or another VPN's current routes.
+This route-based policy is not a system-wide packet-filter kill switch: local
+networks, explicit interface-bound traffic, and more-specific routes retain their
+normal routing behavior. A genuine IPv6 tunnel is used when the gateway provides
+one; split-tunnel connections keep their advertised routing scope.
+
 ## Build
 
 Use the canonical build wrapper:
@@ -51,7 +68,7 @@ Use the canonical build wrapper:
 ```
 
 Artifacts are collected in `dist/osx/pkg/` with the architecture in the filename,
-for example `MS-SSO-OpenConnect-2.1.5-macos-arm64.pkg`. Build with a Python
+for example `MS-SSO-OpenConnect-2.1.6-macos-arm64.pkg`. Build with a Python
 interpreter matching the Mac's architecture; the output is not a universal
 Intel/Apple Silicon package.
 
@@ -61,7 +78,7 @@ example, with uv installed:
 
 ```bash
 uv python install 3.13
-PYTHON_BIN="$(uv python find --managed-python 3.13)" ./frontends/osx/build.sh 2.1.5
+PYTHON_BIN="$(uv python find --managed-python 3.13)" ./frontends/osx/build.sh 2.1.6
 ```
 
 The minimum macOS version is inferred from the native binaries in the app and

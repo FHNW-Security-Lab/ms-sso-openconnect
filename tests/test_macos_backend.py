@@ -31,7 +31,7 @@ def load_backend(platform):
 
 macos = load_backend("darwin")
 linux = load_backend("linux")
-HEALTH = {"pong": True, "version": "1.1.0"}
+HEALTH = {"pong": True, "version": "1.2.0"}
 
 
 def response(result):
@@ -262,7 +262,7 @@ class MacOSWorkerTests(unittest.TestCase):
         self.assertEqual(self.finished, [(False, self.errors[0])])
 
     def test_legacy_helper_requires_package_update_before_authentication(self):
-        for version in ("1.0.0", None, "invalid"):
+        for version in ("1.0.0", "1.1.0", None, "invalid"):
             with self.subTest(version=version):
                 self.errors.clear()
                 self.finished.clear()

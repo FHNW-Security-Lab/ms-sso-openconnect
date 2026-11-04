@@ -8,7 +8,7 @@ REPO_ROOT="$FRONTEND_DIR/../.."
 CODEBASE_UI_DIR="$REPO_ROOT/codebase/ui"
 CORE_DIR="$REPO_ROOT/codebase/core"
 DAEMON_SRC_DIR="$REPO_ROOT/frontends/osx/daemon"
-VERSION="${1:-2.1.5}"
+VERSION="${1:-2.1.6}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Usage: $0 [version]"
@@ -191,6 +191,7 @@ mkdir -p "$DAEMON_DIR" "$LAUNCHDAEMON_DIR"
 source "$VENV_DIR/bin/activate"
 pyinstaller --clean --noconfirm --onedir \
     --name ms-sso-openconnect-daemon \
+    --paths "$DAEMON_SRC_DIR" \
     --distpath "$BUILD_DIR/daemon-dist" \
     --workpath "$BUILD_DIR/daemon-work" \
     --specpath "$BUILD_DIR" \
@@ -203,6 +204,12 @@ cat > "$DAEMON_DIR/ms-sso-openconnect/ms-sso-hip-report" << 'HIP_WRAPPER'
 exec /Library/PrivilegedHelperTools/ms-sso-openconnect/ms-sso-openconnect-daemon --hip-report "$@"
 HIP_WRAPPER
 chmod +x "$DAEMON_DIR/ms-sso-openconnect/ms-sso-hip-report"
+
+cat > "$DAEMON_DIR/ms-sso-openconnect/ms-sso-vpnc-script" << 'NETWORK_WRAPPER'
+#!/bin/sh
+exec /Library/PrivilegedHelperTools/ms-sso-openconnect/ms-sso-openconnect-daemon --network-script
+NETWORK_WRAPPER
+chmod +x "$DAEMON_DIR/ms-sso-openconnect/ms-sso-vpnc-script"
 
 # Declare the actual minimum supported OS from all bundled native binaries.
 MIN_MACOS=$(python "$SCRIPT_DIR/macos-minimum.py" "$PKG_ROOT")
