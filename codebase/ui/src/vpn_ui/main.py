@@ -4,7 +4,7 @@ import sys
 import time
 from typing import Optional
 
-from PyQt6.QtCore import QCoreApplication, QTimer
+from PyQt6.QtCore import QCoreApplication, QTimer, Qt
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
@@ -59,6 +59,9 @@ class VPNApplication:
 
         # Initialize components
         self._worker_thread: Optional[VPNWorkerThread] = None
+        self._retired_threads: list[VPNWorkerThread] = []
+        self._quitting = False
+        self._number_match_dialog = None
         self._current_connection: Optional[str] = None
         self._settings_dialog: Optional[SettingsDialog] = None
         self._disconnecting: bool = False  # Flag to suppress errors during disconnect
@@ -156,7 +159,8 @@ class VPNApplication:
             connection_name: Name of the connection to use
         """
         # Check if already connecting/connected
-        if self._worker_thread and self._worker_thread.isRunning():
+        if (any(t.isRunning() for t in self._retired_threads)
+                or (self._worker_thread and self._worker_thread.isRunning())):
             QMessageBox.warning(
                 None,
                 "Already Connecting",
@@ -183,6 +187,7 @@ class VPNApplication:
         self.backend.clear_active_connection()
 
         self._current_connection = connection_name
+        self.tray.set_managed(True)
         self.tray.set_status(STATUS_CONNECTING, connection_name)
         self.notifications.connecting(connection_name)
 
@@ -196,6 +201,8 @@ class VPNApplication:
             no_dtls=False
         )
 
+        self._worker_thread.connected.connect(self._on_connected)
+        self._worker_thread.number_match.connect(self._on_number_match)
         self._worker_thread.progress.connect(self._on_progress)
         self._worker_thread.finished.connect(self._on_connect_finished)
         self._worker_thread.error.connect(self._on_error)
@@ -211,23 +218,18 @@ class VPNApplication:
         if self._disconnecting:
             return
 
+        self._close_number_match()
         # Set flag to suppress errors during disconnect
         self._disconnecting = True
 
         # Immediately disable disconnect actions to prevent double-click
         self.tray.set_disconnect_enabled(False)
 
-        # Cancel and wait for any existing worker thread (e.g., connect thread)
-        if self._worker_thread and self._worker_thread.isRunning():
-            self._worker_thread.cancel()
-            # Disconnect signals to prevent callbacks during cleanup
-            try:
-                self._worker_thread.progress.disconnect()
-                self._worker_thread.finished.disconnect()
-                self._worker_thread.error.disconnect()
-            except (TypeError, RuntimeError):
-                pass
-            # Don't wait - the disconnect will kill openconnect anyway
+        # Retain cancelled QThreads until they actually exit; authentication
+        # cancellation is cooperative and must never destroy a running thread.
+        if self._worker_thread:
+            self._worker_thread.cancel(force=force)
+            self._cleanup_worker_thread()
 
         # Create and start disconnect worker
         self._worker_thread = create_disconnect_thread(self.backend, force)
@@ -259,43 +261,64 @@ class VPNApplication:
         Args:
             message: Progress message
         """
-        # Could show in a status bar or tooltip
+        if not self._disconnecting:
+            if message.startswith(("Connection lost", "Authenticating", "Establishing")):
+                self.tray.set_status(STATUS_CONNECTING, self._current_connection)
+            self.tray.set_progress(message)
         print(f"[Progress] {message}")
 
     def _cleanup_worker_thread(self) -> None:
-        """Clean up the worker thread after it finishes.
-
-        Uses deferred cleanup to avoid destroying thread from its own signal.
-        """
-        if self._worker_thread is None:
-            return
-
         thread = self._worker_thread
-        self._worker_thread = None
-
-        # Disconnect signals to prevent any further callbacks
-        try:
-            thread.progress.disconnect()
-            thread.finished.disconnect()
-            thread.error.disconnect()
-        except (TypeError, RuntimeError):
-            pass  # Signals might already be disconnected
-
-        # Defer actual cleanup to next event loop iteration
-        # This prevents "QThread: Destroyed while thread is still running"
-        QTimer.singleShot(0, lambda: self._do_thread_cleanup(thread))
-
-    def _do_thread_cleanup(self, thread: VPNWorkerThread) -> None:
-        """Actually clean up the thread (called deferred)."""
         if thread is None:
             return
+        self._worker_thread = None
+        for event in (thread.connected, thread.number_match, thread.progress,
+                      thread.finished, thread.error):
+            try:
+                event.disconnect()
+            except (TypeError, RuntimeError):
+                pass
+        self._retired_threads.append(thread)
+        QTimer.singleShot(0, self._reap_threads)
 
-        # Wait for thread to fully finish if still running
-        if thread.isRunning():
-            thread.wait(2000)
+    def _reap_threads(self) -> None:
+        for thread in self._retired_threads[:]:
+            if not thread.isRunning():
+                self._retired_threads.remove(thread)
+                thread.deleteLater()
+        if self._retired_threads:
+            QTimer.singleShot(100, self._reap_threads)
+        elif self._quitting and self._worker_thread is None:
+            self.app.quit()
 
-        # Schedule for deletion
-        thread.deleteLater()
+    def _close_number_match(self) -> None:
+        dialog, self._number_match_dialog = self._number_match_dialog, None
+        if dialog is not None:
+            try:
+                dialog.close()
+            except RuntimeError:
+                pass
+
+    def _on_connected(self, name: str) -> None:
+        self._close_number_match()
+        if self._disconnecting or self._quitting:
+            return
+        self.tray.set_status(STATUS_CONNECTED, name)
+        self.notifications.connected(name)
+        self.backend.save_active_connection(name)
+
+    def _on_number_match(self, number: str) -> None:
+        if self._disconnecting or self._quitting:
+            return
+        self._close_number_match()
+        # Use a visible dialog even when desktop notifications are disabled.
+        dialog = QMessageBox()
+        dialog.setWindowTitle("Microsoft Authenticator")
+        dialog.setText(f"Enter {number} in Microsoft Authenticator to approve this VPN sign-in.")
+        dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._number_match_dialog = dialog
+        dialog.show()
 
     def _on_connect_finished(self, success: bool, message: str) -> None:
         """Handle connection finished signal.
@@ -304,9 +327,18 @@ class VPNApplication:
             success: Whether connection succeeded
             message: Status message
         """
+        self._close_number_match()
         # Clean up worker thread properly
         self._cleanup_worker_thread()
+        self.tray.set_managed(False)
 
+        if not success and self.backend.is_connected():
+            # A failed cleanup can leave the owned tunnel running. Keep its
+            # identity and Disconnect action available instead of hiding it.
+            self.tray.set_status(STATUS_CONNECTED, self._current_connection)
+            if not self._disconnecting:
+                self.notifications.error(message)
+            return
         if success:
             self.tray.set_status(STATUS_CONNECTED, self._current_connection)
             self.notifications.connected(self._current_connection)
@@ -315,7 +347,7 @@ class VPNApplication:
         else:
             self.tray.set_status(STATUS_DISCONNECTED)
             # Only show error if not intentionally disconnecting
-            if not self._disconnecting:
+            if not self._disconnecting and message not in {"Cancelled", "Disconnected"}:
                 self.notifications.error(message)
             self._current_connection = None
             self.backend.clear_active_connection()
@@ -327,16 +359,25 @@ class VPNApplication:
             success: Whether disconnect succeeded
             message: Status message
         """
+        self._close_number_match()
         # Clean up worker thread properly
         self._cleanup_worker_thread()
 
-        self._disconnecting = False  # Clear flag
+        self._disconnecting = False
+        self.tray.set_managed(False)
+        if not success:
+            self._quitting = False
+            self.tray.show()
+            if self.backend.is_connected():
+                self.tray.set_status(STATUS_CONNECTED, self._current_connection)
+            else:
+                self.tray.set_status(STATUS_DISCONNECTED)
+            self.notifications.error(message)
+            self.tray.start_status_polling()
+            return
         self.tray.set_status(STATUS_DISCONNECTED)
-        if success:
-            self.notifications.disconnected()
-        # Don't show error on disconnect - it's intentional
+        self.notifications.disconnected()
         self._current_connection = None
-        # Clear active connection state
         self.backend.clear_active_connection()
 
     def _on_error(self, error: str) -> None:
@@ -353,32 +394,19 @@ class VPNApplication:
         print(f"[Error] {error}")
 
     def _quit(self) -> None:
-        """Quit the application."""
-        # Ask about disconnecting if connected
-        if self.backend.is_connected():
+        if self.backend.is_connected() or (self._worker_thread and self._worker_thread.isRunning()):
             reply = QMessageBox.question(
-                None,
-                "Quit",
-                "VPN is currently connected.\n\n"
-                "Do you want to disconnect before quitting?",
-                QMessageBox.StandardButton.Yes |
-                QMessageBox.StandardButton.No |
-                QMessageBox.StandardButton.Cancel
+                None, "Quit", "Disconnect the VPN and quit?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             )
-
-            if reply == QMessageBox.StandardButton.Cancel:
+            if reply != QMessageBox.StandardButton.Yes:
                 return
-            elif reply == QMessageBox.StandardButton.Yes:
-                self.backend.disconnect(force=False)
-
-        # Stop status polling
+        self._quitting = True
         self.tray.stop_status_polling()
-
-        # Hide tray
         self.tray.hide()
+        self._on_disconnect_requested(False)
+        # _reap_threads quits only after both authentication and tunnel teardown.
 
-        # Quit application
-        self.app.quit()
 
 
 def main() -> int:

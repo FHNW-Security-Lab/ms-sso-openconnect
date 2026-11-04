@@ -1,51 +1,41 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-INSTALL_DIR="/opt/ms-sso-openconnect-ui"
-
-case "$1" in
-    configure)
-        # Create virtual environment
-        python3 -m venv "$INSTALL_DIR/venv"
-
-        # Install dependencies
-        "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip wheel
-        "$INSTALL_DIR/venv/bin/pip" install --quiet PyQt6 keyring pyotp playwright secretstorage
-
-        # Uninstall old package completely (removes both vpn_ui and dist-info)
-        "$INSTALL_DIR/venv/bin/pip" uninstall -y ms-sso-openconnect-ui 2>/dev/null || true
-
-        # Remove stale build cache to force rebuild from fresh source
-        rm -rf "$INSTALL_DIR/build"
-
-        # Install the package fresh
-        "$INSTALL_DIR/venv/bin/pip" install --quiet --no-cache-dir "$INSTALL_DIR"
-
-        # Install Playwright browsers
-        PLAYWRIGHT_BROWSERS_PATH="$INSTALL_DIR/browsers" "$INSTALL_DIR/venv/bin/playwright" install chromium
-
-        # Create launcher script
-        cat > /usr/bin/ms-sso-openconnect-ui << 'EOF'
-#!/bin/bash
 INSTALL_DIR="/opt/ms-sso-openconnect-ui"
 export PLAYWRIGHT_BROWSERS_PATH="$INSTALL_DIR/browsers"
-export PYTHONPATH="$INSTALL_DIR:$PYTHONPATH"
-exec "$INSTALL_DIR/venv/bin/python" -m vpn_ui "$@"
-EOF
-        chmod +x /usr/bin/ms-sso-openconnect-ui
 
-        # Update icon cache
-        if command -v gtk-update-icon-cache &> /dev/null; then
-            gtk-update-icon-cache -f /usr/share/icons/hicolor/ 2>/dev/null || true
+case "${1:-}" in
+    configure)
+        # System Qt/keyring packages are maintained by APT. Only Playwright's
+        # coherent Python/Node runtime is installed into this private venv.
+        # Recreate a broken venv after a distro Python upgrade.
+        if ! "$INSTALL_DIR/venv/bin/python" -c 'import sys, pip; assert sys.version_info >= (3, 10)' 2>/dev/null; then
+            rm -rf "$INSTALL_DIR/venv"
+            python3 -m venv --system-site-packages "$INSTALL_DIR/venv"
         fi
-
-        # Update desktop database
-        if command -v update-desktop-database &> /dev/null; then
-            update-desktop-database /usr/share/applications/ 2>/dev/null || true
+        # Enable distro packages in environments created by releases <= 2.0.0.
+        sed -i 's/include-system-site-packages = false/include-system-site-packages = true/' "$INSTALL_DIR/venv/pyvenv.cfg"
+        # Old releases installed vpn_ui in site-packages. The dpkg-owned source
+        # is now used directly, so remove stale copies before checking imports.
+        "$INSTALL_DIR/venv/bin/python" -m pip uninstall -y ms-sso-openconnect-ui >/dev/null 2>&1 || true
+        if ! "$INSTALL_DIR/venv/bin/python" -c 'from importlib.metadata import version; assert (1, 55) <= tuple(map(int, version("playwright").split(".")[:2])) < (2, 0); from playwright.sync_api import sync_playwright; p = sync_playwright().start(); p.stop()' 2>/dev/null; then
+            "$INSTALL_DIR/venv/bin/python" -m pip install --upgrade 'playwright>=1.55,<2'
         fi
+        check_chromium() {
+            "$INSTALL_DIR/venv/bin/python" -c 'from playwright.sync_api import sync_playwright; p = sync_playwright().start(); b = p.chromium.launch(headless=True, args=["--no-sandbox"]); b.close(); p.stop()'
+        }
+        if ! check_chromium >/dev/null 2>&1; then
+            mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
+            "$INSTALL_DIR/venv/bin/python" -m playwright install chromium
+            check_chromium || {
+                echo "ERROR: Chromium cannot start; verify the package runtime dependencies." >&2
+                exit 1
+            }
+        fi
+        # Check the actual launcher imports without opening a GUI or a VPN.
+        PYTHONPATH="$INSTALL_DIR/src:$INSTALL_DIR" "$INSTALL_DIR/venv/bin/python" -c 'import PyQt6.QtWidgets, keyring, core, vpn_ui'
         ;;
 esac
 
 #DEBHELPER#
-
 exit 0

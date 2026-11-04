@@ -1,33 +1,13 @@
 #!/usr/bin/make -f
 
-export DH_VIRTUALENV_INSTALL_ROOT=/opt
-export PYBUILD_NAME=ms-sso-openconnect-ui
-
 %:
-	dh $@ --with python3 --buildsystem=pybuild
-
-override_dh_auto_build:
-	@echo "Skipping build (installed via pip in postinst)"
+	dh $@ --buildsystem=none
 
 override_dh_auto_install:
-	# Create installation directories
-	mkdir -p debian/ms-sso-openconnect-ui/opt/ms-sso-openconnect-ui
-	mkdir -p debian/ms-sso-openconnect-ui/usr/share/applications
-	mkdir -p debian/ms-sso-openconnect-ui/usr/share/icons/hicolor/256x256/apps
-	mkdir -p debian/ms-sso-openconnect-ui/usr/share/polkit-1/actions
-	mkdir -p debian/ms-sso-openconnect-ui/usr/bin
-
-	# Copy source files
-	cp -r src debian/ms-sso-openconnect-ui/opt/ms-sso-openconnect-ui/
-	cp -r core debian/ms-sso-openconnect-ui/opt/ms-sso-openconnect-ui/
-	cp pyproject.toml debian/ms-sso-openconnect-ui/opt/ms-sso-openconnect-ui/
-
-	# Copy desktop file and icon
-	cp packaging/linux/desktop/ms-sso-openconnect-ui.desktop debian/ms-sso-openconnect-ui/usr/share/applications/
-	cp src/vpn_ui/resources/icons/app-icon.svg debian/ms-sso-openconnect-ui/usr/share/icons/hicolor/256x256/apps/ms-sso-openconnect-ui.svg
-
-	# Copy polkit policy for passwordless VPN
-	cp packaging/linux/polkit/org.openconnect.policy debian/ms-sso-openconnect-ui/usr/share/polkit-1/actions/
-
-override_dh_auto_test:
-	@echo "Skipping tests"
+	install -d debian/ms-sso-openconnect-ui/opt/ms-sso-openconnect-ui
+	cp -r src core debian/ms-sso-openconnect-ui/opt/ms-sso-openconnect-ui/
+	install -Dm644 packaging/linux/desktop/ms-sso-openconnect-ui.desktop debian/ms-sso-openconnect-ui/usr/share/applications/ms-sso-openconnect-ui.desktop
+	install -Dm644 src/vpn_ui/resources/icons/app-icon.svg debian/ms-sso-openconnect-ui/usr/share/icons/hicolor/scalable/apps/ms-sso-openconnect-ui.svg
+	install -Dm644 packaging/linux/polkit/org.openconnect.policy debian/ms-sso-openconnect-ui/usr/share/polkit-1/actions/org.openconnect.policy
+	install -Dm755 packaging/linux/ms-sso-openconnect-ui debian/ms-sso-openconnect-ui/usr/bin/ms-sso-openconnect-ui
+	install -Dm755 core/gp_hipreport.py debian/ms-sso-openconnect-ui/usr/libexec/ms-sso-openconnect-gp-hipreport

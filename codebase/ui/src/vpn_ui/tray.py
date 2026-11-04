@@ -38,6 +38,7 @@ class VPNTrayIcon(QObject):
         self._current_status = STATUS_DISCONNECTED
         self._current_connection: Optional[str] = None
         self._connections: dict = {}
+        self._managed = False
 
         # Load icons
         self._icons = {
@@ -215,11 +216,25 @@ class VPNTrayIcon(QObject):
         """Stop status polling."""
         self._status_timer.stop()
 
+    def set_managed(self, managed: bool) -> None:
+        """Let the connection worker own status during auth, retry and teardown."""
+        self._managed = managed
+
+    def set_progress(self, message: str) -> None:
+        """Expose authentication and reconnect progress in the tray menu."""
+        if self._managed:
+            self._status_action.setText(message)
+            self.tray.setToolTip(f"{APP_NAME} - {message}")
+
     def _poll_status(self) -> None:
         """Poll VPN connection status.
 
         This is called by the timer to check if openconnect is running.
         """
+        # Process existence is not tunnel readiness; the worker owns transitions
+        # while authenticating, connected, reconnecting or disconnecting.
+        if self._managed or self._current_status == STATUS_CONNECTING:
+            return
         # Import here to avoid circular imports
         from vpn_ui.backend import get_backend
 

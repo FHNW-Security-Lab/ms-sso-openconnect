@@ -3,7 +3,7 @@
 This module provides the VPNBackend class with platform-specific
 implementations for connecting, disconnecting, and checking VPN status.
 
-- Linux: Uses pkexec for privilege escalation, SIGKILL for disconnect
+- Linux: Uses pkexec and graceful signals for the owned tunnel
 - macOS: Uses daemon IPC for privilege escalation, SIGTERM for graceful disconnect
 """
 
@@ -282,70 +282,22 @@ class VPNBackend(SharedBackendMixin):
                 return False
 
     else:
-        # =====================================================================
-        # Linux Implementation - Uses pkexec
-        # =====================================================================
-
         def connect_vpn(
-            self,
-            address: str,
-            protocol: str,
-            cookies: dict,
-            no_dtls: bool = False,
-            username: Optional[str] = None,
-            allow_fallback: bool = False,
-            connection_name: Optional[str] = None,
-            cached_usergroup: Optional[str] = None,
+            self, address: str, protocol: str, cookies: dict, no_dtls: bool = False,
+            username: Optional[str] = None, allow_fallback: bool = False,
+            connection_name: Optional[str] = None, cached_usergroup: Optional[str] = None,
+            **options,
         ) -> bool:
-            """Connect to VPN using pkexec (Linux).
-
-            Uses pkexec (PolicyKit) for privilege escalation which shows
-            a graphical password prompt.
-            """
             return core_connect_vpn(
                 address, protocol, cookies, no_dtls, username,
                 allow_fallback, connection_name, cached_usergroup,
-                use_pkexec=True  # Use pkexec for GUI (no terminal needed)
+                use_pkexec=True, **options,
             )
 
         def disconnect(self, force: bool = False) -> bool:
-            """Disconnect from VPN using pkexec (Linux).
-
-            Args:
-                force: If True, send SIGTERM (terminate session).
-                       If False, send SIGKILL (keep session alive for reconnect).
-            """
-            try:
-                # IMPORTANT: Use -x for exact process name match
-                # -f would match paths containing "openconnect" and kill the UI
-                signal_flag = "-TERM" if force else "-KILL"
-                result = subprocess.run(
-                    ["pkexec", "pkill", signal_flag, "-x", "openconnect"],
-                    capture_output=True
-                )
-                if result.returncode == 0:
-                    if force:
-                        self.clear_stored_cookies()
-                    return True
-
-                # Fallback: try sudo (might work if running from terminal)
-                result = subprocess.run(
-                    ["sudo", "-n", "pkill", signal_flag, "-x", "openconnect"],
-                    capture_output=True
-                )
-                return result.returncode == 0
-            except Exception:
-                return False
+            from core.connect import disconnect
+            return disconnect(force=force, use_pkexec=True)
 
         def is_connected(self) -> bool:
-            """Check if VPN is connected (Linux)."""
-            try:
-                # Use pgrep -x for exact process name match
-                result = subprocess.run(
-                    ["pgrep", "-x", "openconnect"],
-                    capture_output=True,
-                    text=True
-                )
-                return result.returncode == 0
-            except Exception:
-                return False
+            from core.connect import is_connected
+            return is_connected()

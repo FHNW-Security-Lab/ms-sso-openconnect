@@ -4,13 +4,14 @@
 , openconnect
 , polkit
 , procps
+, iproute2
 , playwright-driver
 , ms-sso-openconnect-core
 }:
 
 python3Packages.buildPythonApplication rec {
   pname = "ms-sso-openconnect-ui";
-  version = "2.0.0";
+  version = "2.1.0";
   pyproject = true;
 
   src = ../codebase/ui;
@@ -33,14 +34,14 @@ python3Packages.buildPythonApplication rec {
   dependencies = with python3Packages; [
     pyqt6
     keyring
-    pyotp
+    platformdirs
     playwright
     secretstorage
     ms-sso-openconnect-core
   ];
 
   makeWrapperArgs = [
-    "--prefix" "PATH" ":" (lib.makeBinPath [ openconnect polkit procps ])
+    "--prefix" "PATH" ":" (lib.makeBinPath [ openconnect polkit procps iproute2 ])
     "--run" ''
       pw_cache="$HOME/.cache/ms-playwright"
       if [ ! -e "$pw_cache" ]; then
@@ -63,8 +64,7 @@ python3Packages.buildPythonApplication rec {
       $out/share/polkit-1/actions/org.openconnect.policy
 
     substituteInPlace $out/share/polkit-1/actions/org.openconnect.policy \
-      --replace /usr/sbin/openconnect ${lib.getExe' openconnect "openconnect"} \
-      --replace /usr/bin/pkill ${lib.getExe' procps "pkill"}
+      --replace /usr/sbin/openconnect ${lib.getExe' openconnect "openconnect"}
   '';
 
   doCheck = false;

@@ -38,7 +38,8 @@ class VPNBackendProtocol(Protocol):
         protocol: str,
         username: str,
         password: str,
-        totp_secret: str
+        totp_secret: str,
+        **options,
     ) -> bool:
         """Save a VPN connection.
 
@@ -119,7 +120,8 @@ class VPNBackendProtocol(Protocol):
         totp_secret: str,
         protocol: str = "anyconnect",
         headless: bool = True,
-        debug: bool = False
+        debug: bool = False,
+        **options,
     ) -> Optional[dict]:
         """Perform SAML authentication via browser automation.
 
@@ -149,6 +151,7 @@ class VPNBackendProtocol(Protocol):
         allow_fallback: bool = False,
         connection_name: Optional[str] = None,
         cached_usergroup: Optional[str] = None,
+        **options,
     ) -> bool:
         """Connect to VPN using openconnect.
 

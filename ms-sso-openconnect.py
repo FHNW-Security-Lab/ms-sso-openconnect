@@ -45,7 +45,8 @@ from core import (
     get_stored_cookies,
     clear_stored_cookies,
     # Auth
-    do_saml_auth,
+    do_saml_auth_with_recovery,
+    SamlSensitiveActionError,
     # Connect
     connect_vpn,
     disconnect,
@@ -155,7 +156,7 @@ def setup_config_cmd(edit_name=None):
         if not totp_secret:
             totp_secret = default_totp
     else:
-        totp_secret = input("TOTP secret (base32): ").strip()
+        totp_secret = input("TOTP secret (base32, blank for Authenticator approval): ").strip()
 
     # Save
     if save_connection(name, address, protocol, username, password, totp_secret):
@@ -238,12 +239,10 @@ def main():
 
     # Handle disconnect commands
     if args.disconnect:
-        disconnect(force=False)
-        return
+        sys.exit(0 if disconnect(force=False) else 1)
 
     if args.force_disconnect:
-        disconnect(force=True)
-        return
+        sys.exit(0 if disconnect(force=True) else 1)
 
     # Handle management commands
     if args.list:
@@ -272,7 +271,7 @@ def main():
 
     conn_name, address, protocol, username, password, totp_secret = config
 
-    if not all([conn_name, address, protocol, username, password, totp_secret]):
+    if not all([conn_name, address, protocol, username, password]):
         print(f"{RED}Connection incomplete. Use --setup to configure.{NC}")
         sys.exit(1)
 
@@ -280,124 +279,91 @@ def main():
     print(f"{GREEN}VPN Server: {address}{NC}")
     print(f"{GREEN}Protocol: {PROTOCOLS.get(protocol, {}).get('name', protocol)}{NC}")
     print(f"{GREEN}Username: {username}{NC}")
-    print(f"{GREEN}TOTP code will be generated automatically.{NC}\n")
+    options = get_connection(conn_name) or {}
+    gp_interface = options.get("gp_auth_interface", "portal")
 
-    # Auto-reconnect watchdog for both AnyConnect and GlobalProtect.
-    try:
-        max_connect_attempts = max(
-            1,
-            int(os.environ.get("MS_SSO_RECONNECT_MAX_ATTEMPTS", "3").strip() or "3"),
-        )
-    except Exception:
-        max_connect_attempts = 3
-    try:
-        reconnect_delay_seconds = max(
-            0,
-            int(os.environ.get("MS_SSO_RECONNECT_DELAY_SECONDS", "5").strip() or "5"),
-        )
-    except Exception:
-        reconnect_delay_seconds = 5
-
-    # Fresh auth retries (mostly useful for first uncached AnyConnect attempts).
-    fresh_auth_attempts = 1
-    anyconnect_retry_delay_seconds = 2
-    if protocol == "anyconnect":
+    def env_int(key, default, minimum, maximum):
         try:
-            fresh_auth_attempts = max(
-                1,
-                int(os.environ.get("MS_SSO_ANYCONNECT_FRESH_AUTH_ATTEMPTS", "2").strip() or "2"),
+            return max(minimum, min(maximum, int(os.environ.get(key, str(default)))))
+        except ValueError:
+            return default
+
+    attempts = env_int("MS_SSO_RECONNECT_MAX_ATTEMPTS", 0, 0, 1000)
+    delay = env_int("MS_SSO_RECONNECT_DELAY_SECONDS", 5, 0, 300)
+    if not options.get("auto_reconnect", True):
+        attempts = 1
+    cached = None if args.no_cache else get_stored_cookies(conn_name)
+    if protocol == "gp" and (gp_interface == "gateway" or not cached
+                             or not cached[0].get("portal-userauthcookie")):
+        cached = None
+    attempt = 0
+    connected_at = None
+
+    def connected():
+        nonlocal connected_at
+        connected_at = time.monotonic()
+        print(f"{GREEN}VPN tunnel established. Press Ctrl+C to disconnect.{NC}")
+
+    def show_number(number):
+        print(f"Microsoft Authenticator: enter {number} to approve this VPN sign-in.", flush=True)
+        return True
+
+    while not attempts or attempt < attempts:
+        if attempt:
+            wait = min(300, delay * (2 ** min(attempt - 1, 10)))
+            budget = f"/{attempts}" if attempts else ""
+            print(f"{YELLOW}Reconnecting ({attempt + 1}{budget}) in {wait}s...{NC}")
+            time.sleep(wait)
+        candidates = [cached, None] if cached else [None]
+        cached = None
+        for candidate in candidates:
+            if candidate:
+                cookies, group = candidate
+                print("Trying saved session...")
+            else:
+                try:
+                    cookies = do_saml_auth_with_recovery(
+                        address, username, password, totp_secret,
+                        auto_totp=True, headless=not args.visible, debug=args.debug,
+                        protocol=protocol, gp_auth_interface=gp_interface,
+                        gp_os_version=options.get("gp_os_version") or None,
+                        mfa_preference=options.get("mfa_preference", "auto"),
+                        number_match_callback=show_number,
+                    )
+                except SamlSensitiveActionError as exc:
+                    print(f"{RED}Authentication failed: {exc}{NC}")
+                    sys.exit(1)
+                except Exception as exc:
+                    print(f"{YELLOW}Sign-in unavailable: {exc}{NC}")
+                    break
+                group = None
+                if not cookies:
+                    print(f"{RED}Authentication did not complete. Reconnect to try again.{NC}")
+                    sys.exit(1)
+                if protocol != "gp":
+                    store_cookies(conn_name, cookies)
+            stopped = connect_vpn(
+                address, protocol, cookies, no_dtls=args.no_dtls, username=username,
+                connection_name=conn_name, cached_usergroup=group,
+                connected_callback=connected, gp_auth_interface=gp_interface,
+                gp_os_version=options.get("gp_os_version") or None,
             )
-        except Exception:
-            fresh_auth_attempts = 2
-        try:
-            anyconnect_retry_delay_seconds = max(
-                0,
-                int(os.environ.get("MS_SSO_ANYCONNECT_RETRY_DELAY_SECONDS", "2").strip() or "2"),
-            )
-        except Exception:
-            anyconnect_retry_delay_seconds = 2
-
-    auth_succeeded = False
-    used_cached_cookie = False
-
-    for connect_attempt in range(max_connect_attempts):
-        if connect_attempt > 0:
-            print(
-                f"{YELLOW}Watchdog retry {connect_attempt + 1}/{max_connect_attempts} in "
-                f"{reconnect_delay_seconds}s...{NC}"
-            )
-            if reconnect_delay_seconds > 0:
-                time.sleep(reconnect_delay_seconds)
-
-        # Try cached AnyConnect cookie only once on the very first attempt.
-        if not used_cached_cookie and not args.no_cache and protocol != "gp":
-            cached_result = get_stored_cookies(conn_name)
-            used_cached_cookie = True
-            if cached_result:
-                cached_cookies, cached_usergroup = cached_result
-                print(f"{GREEN}Found cached session cookie.{NC}")
-                if cached_usergroup:
-                    print(f"  Cached usergroup: {cached_usergroup}")
-                print(f"{CYAN}Trying cached session cookie...{NC}")
-                success = connect_vpn(
-                    address, protocol, cached_cookies.copy(),
-                    no_dtls=args.no_dtls,
-                    username=username,
-                    allow_fallback=True,
-                    connection_name=conn_name,
-                    cached_usergroup=cached_usergroup
-                )
-                if success:
-                    return
-                print(f"{YELLOW}Cached cookie expired or invalid. Re-authenticating...{NC}\n")
-                clear_stored_cookies(conn_name)
-
-        # Authenticate and connect (with protocol-specific fresh-auth retries).
-        for auth_attempt in range(fresh_auth_attempts):
-            if auth_attempt > 0:
-                print(
-                    f"{YELLOW}Fresh AnyConnect attempt {auth_attempt + 1}/{fresh_auth_attempts} "
-                    f"after connect failure...{NC}"
-                )
-                if anyconnect_retry_delay_seconds > 0:
-                    time.sleep(anyconnect_retry_delay_seconds)
-
-            cookies = do_saml_auth(
-                address, username, password, totp_secret,
-                auto_totp=True,
-                headless=not args.visible,
-                debug=args.debug,
-                protocol=protocol
-            )
-
-            if not cookies:
-                continue
-
-            auth_succeeded = True
-
-            # Store cookies (skip for GlobalProtect due to short TTL)
-            if protocol != 'gp':
-                store_cookies(conn_name, cookies, usergroup='portal:prelogin-cookie')
-
-            success = connect_vpn(
-                address, protocol, cookies,
-                no_dtls=args.no_dtls,
-                username=username,
-                connection_name=conn_name
-            )
-            if success:
+            if stopped:
                 return
-
-            # Don't keep a failed fresh-auth cookie cached.
-            if protocol != 'gp':
-                clear_stored_cookies(conn_name)
-
-    print(
-        f"\n{RED}{'VPN connection failed after retries.' if auth_succeeded else 'Authentication failed after retries.'}{NC}"
-    )
-    print(f"Try with --visible to see the browser window.")
+            clear_stored_cookies(conn_name)
+        if (options.get("auto_reconnect", True) and connected_at is not None
+                and time.monotonic() - connected_at >= 60):
+            attempt = 0
+            connected_at = None
+            time.sleep(delay)
+        else:
+            attempt += 1
+    print(f"{RED}VPN connection failed after {attempts} attempts.{NC}")
     sys.exit(1)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nCancelled.")

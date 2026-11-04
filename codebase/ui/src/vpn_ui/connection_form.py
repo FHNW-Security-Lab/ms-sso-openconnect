@@ -4,6 +4,7 @@ from typing import Optional
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QHBoxLayout,
@@ -66,7 +67,6 @@ class ConnectionForm(QWidget):
         # Password
         self.password_edit = QLineEdit()
         self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        layout.addRow("Password:", self.password_edit)
 
         # Show/hide password button
         self._password_visible = False
@@ -78,14 +78,12 @@ class ConnectionForm(QWidget):
         password_layout.addWidget(self.password_edit)
         password_layout.addWidget(self.toggle_password_btn)
 
-        # Replace the password row
-        layout.removeRow(4)  # Remove the password row we just added
-        layout.insertRow(4, "Password:", password_layout)
+        layout.addRow("Password:", password_layout)
 
         # TOTP secret (hidden by default like password)
         self.totp_edit = QLineEdit()
         self.totp_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.totp_edit.setPlaceholderText("Base32 TOTP secret (from authenticator app setup)")
+        self.totp_edit.setPlaceholderText("Optional for phone approval; required for TOTP")
 
         # Show/hide TOTP button
         self._totp_visible = False
@@ -108,6 +106,27 @@ class ConnectionForm(QWidget):
         test_layout.addStretch()
         layout.addRow("", test_layout)
 
+        self.mfa_combo = QComboBox()
+        for label, value in [("Automatic (prefer TOTP)", "auto"),
+                             ("Verification code (TOTP)", "totp"),
+                             ("Phone approval", "push")]:
+            self.mfa_combo.addItem(label, value)
+        layout.addRow("MFA Method:", self.mfa_combo)
+
+        self.gp_interface_combo = QComboBox()
+        self.gp_interface_combo.addItem("Portal", "portal")
+        self.gp_interface_combo.addItem("Direct gateway", "gateway")
+        layout.addRow("GP Authentication:", self.gp_interface_combo)
+        self.gp_os_edit = QLineEdit()
+        self.gp_os_edit.setPlaceholderText("Detect this computer's operating system")
+        layout.addRow("GP OS Version:", self.gp_os_edit)
+        self.protocol_combo.currentIndexChanged.connect(self._update_protocol_fields)
+        self._update_protocol_fields()
+
+        self.reconnect_check = QCheckBox("Reconnect after a dropped or expired session")
+        self.reconnect_check.setChecked(True)
+        layout.addRow("", self.reconnect_check)
+
         # Buttons
         btn_layout = QHBoxLayout()
         self.save_btn = QPushButton("Save")
@@ -118,6 +137,11 @@ class ConnectionForm(QWidget):
         btn_layout.addWidget(self.clear_btn)
         btn_layout.addWidget(self.save_btn)
         layout.addRow("", btn_layout)
+
+    def _update_protocol_fields(self) -> None:
+        enabled = self.protocol_combo.currentData() == "gp"
+        self.gp_interface_combo.setEnabled(enabled)
+        self.gp_os_edit.setEnabled(enabled)
 
     def _toggle_password_visibility(self) -> None:
         """Toggle password field visibility."""
@@ -161,8 +185,13 @@ class ConnectionForm(QWidget):
         self.username_edit.setText(conn.get("username", ""))
         self.password_edit.setText(conn.get("password", ""))
         self.totp_edit.setText(conn.get("totp_secret", ""))
+        self.mfa_combo.setCurrentIndex(max(0, self.mfa_combo.findData(conn.get("mfa_preference", "auto"))))
+        self.gp_interface_combo.setCurrentIndex(max(0, self.gp_interface_combo.findData(conn.get("gp_auth_interface", "portal"))))
+        self.gp_os_edit.setText(conn.get("gp_os_version", "") or "")
+        self.reconnect_check.setChecked(conn.get("auto_reconnect", True))
 
         self.totp_result_label.clear()
+
 
     def new_connection(self) -> None:
         """Prepare the form for a new connection."""
@@ -182,6 +211,10 @@ class ConnectionForm(QWidget):
         self.password_edit.clear()
         self.totp_edit.clear()
         self.totp_result_label.clear()
+        self.mfa_combo.setCurrentIndex(0)
+        self.gp_interface_combo.setCurrentIndex(0)
+        self.gp_os_edit.clear()
+        self.reconnect_check.setChecked(True)
 
     def _test_totp(self) -> None:
         """Test the TOTP secret by generating a code."""
@@ -219,8 +252,8 @@ class ConnectionForm(QWidget):
             errors.append("Username is required")
         if not password:
             errors.append("Password is required")
-        if not totp_secret:
-            errors.append("TOTP secret is required")
+        if not totp_secret and self.mfa_combo.currentData() == "totp":
+            errors.append("A TOTP secret is required for verification-code authentication")
 
         if errors:
             QMessageBox.warning(
@@ -232,7 +265,8 @@ class ConnectionForm(QWidget):
 
         # Validate TOTP secret
         try:
-            self.backend.generate_totp(totp_secret)
+            if totp_secret:
+                self.backend.generate_totp(totp_secret)
         except Exception as e:
             QMessageBox.warning(
                 self,
@@ -258,7 +292,11 @@ class ConnectionForm(QWidget):
 
         # Save
         success = self.backend.save_connection(
-            name, address, protocol, username, password, totp_secret
+            name, address, protocol, username, password, totp_secret,
+            mfa_preference=self.mfa_combo.currentData(),
+            gp_auth_interface=self.gp_interface_combo.currentData(),
+            gp_os_version=self.gp_os_edit.text().strip(),
+            auto_reconnect=self.reconnect_check.isChecked(),
         )
 
         if success:

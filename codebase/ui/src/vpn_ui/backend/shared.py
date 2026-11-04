@@ -131,7 +131,7 @@ from core import (
     get_stored_cookies,
     clear_stored_cookies,
     # Auth
-    do_saml_auth,
+    do_saml_auth_with_recovery,
     # Connect
     connect_vpn as _connect_vpn,
     # TOTP
@@ -164,22 +164,21 @@ class SharedBackendMixin:
         protocol: str,
         username: str,
         password: str,
-        totp_secret: str
+        totp_secret: str,
+        **options,
     ) -> bool:
         """Save a VPN connection."""
         try:
-            save_connection(
-                name, address, protocol, username, password, totp_secret
+            return save_connection(
+                name, address, protocol, username, password, totp_secret, **options
             )
-            return True
         except Exception:
             return False
 
     def delete_connection(self, name: str) -> bool:
         """Delete a VPN connection."""
         try:
-            delete_connection(name)
-            return True
+            return delete_connection(name)
         except Exception:
             return False
 
@@ -197,16 +196,14 @@ class SharedBackendMixin:
     ) -> bool:
         """Store session cookies for a connection."""
         try:
-            store_cookies(name, cookies, usergroup)
-            return True
+            return store_cookies(name, cookies, usergroup)
         except Exception:
             return False
 
     def clear_stored_cookies(self, name: Optional[str] = None) -> bool:
         """Clear cached cookies."""
         try:
-            clear_stored_cookies(name)
-            return True
+            return clear_stored_cookies(name)
         except Exception:
             return False
 
@@ -220,10 +217,11 @@ class SharedBackendMixin:
         totp_secret: str,
         protocol: str = "anyconnect",
         headless: bool = True,
-        debug: bool = False
+        debug: bool = False,
+        **options,
     ) -> Optional[dict]:
         """Perform SAML authentication via browser automation."""
-        return do_saml_auth(
+        return do_saml_auth_with_recovery(
             vpn_server,
             username,
             password,
@@ -232,6 +230,7 @@ class SharedBackendMixin:
             auto_totp=True,
             headless=headless,
             debug=debug,
+            **options,
         )
 
     # State Management
@@ -288,6 +287,10 @@ class SharedBackendMixin:
             if ":" in host and host.count(":") == 1:
                 host = host.split(":", 1)[0]
             return host
+
+        if sys.platform != "darwin":
+            from core.connect import active_connection_name
+            return active_connection_name()
 
         if not self.is_connected():
             return None

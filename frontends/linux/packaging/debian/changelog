@@ -1,3 +1,14 @@
+ms-sso-openconnect-ui (2.1.0-1) unstable; urgency=medium
+
+  * Port adaptive Microsoft MFA, session recovery, and GlobalProtect updates
+  * Harden connection lifecycle, cancellation, and reconnect handling
+  * Require OpenConnect 9.12 and declare desktop/browser runtime dependencies
+  * Reuse verified Playwright runtimes and package the application launcher
+  * Fix Debian staging, version selection, and build dependency checks
+  * Require administrator authorization for privileged OpenConnect commands
+
+ -- MS SSO OpenConnect Maintainers <maintainers@example.com>  Wed, 04 Nov 2026 12:00:00 +0100
+
 ms-sso-openconnect-ui (2.0.0-1) unstable; urgency=medium
 
   * Unified Linux and macOS UI

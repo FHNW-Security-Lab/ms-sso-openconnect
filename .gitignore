@@ -25,3 +25,9 @@ ui/build/
 ui/dist/
 *.AppImage
 appimagetool*
+
+# Frontend and release build artifacts
+frontends/*/build/
+frontends/*/dist/
+dist/
+.pytest_cache/

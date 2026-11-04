@@ -6,7 +6,9 @@ Provides two storage backends:
 """
 
 import json
+import hashlib
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Optional, Tuple
@@ -33,13 +35,15 @@ def _get_user_cache_dir() -> Path:
     else:
         cache_dir = Path(user_cache_dir(APP_NAME))
 
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     return cache_dir
 
 
 def _get_cookie_file(name: str) -> Path:
     """Get path to cookie file for a connection (user storage)."""
-    safe_name = name.replace("/", "_").replace(":", "_").replace(" ", "_")
+    # Sanitizing separators made distinct profile names share a login cookie.
+    # Old ambiguous filenames are deliberately not reused after upgrade.
+    safe_name = hashlib.sha256(name.encode("utf-8")).hexdigest()
     return _get_user_cache_dir() / f"session_{safe_name}.json"
 
 
@@ -67,8 +71,16 @@ def store_cookies(
         if usergroup:
             data["usergroup"] = usergroup
 
-        cookie_file.write_text(json.dumps(data))
-        cookie_file.chmod(0o600)
+        # Write privately from creation and replace atomically: readers must not
+        # see a half-written cookie or a momentarily world-readable token.
+        fd, temporary_name = tempfile.mkstemp(prefix=".session-", dir=cookie_file.parent)
+        try:
+            with os.fdopen(fd, "w") as output:
+                json.dump(data, output)
+            os.replace(temporary_name, cookie_file)
+        finally:
+            if os.path.exists(temporary_name):
+                os.unlink(temporary_name)
 
         # Chown to real user if running as root via sudo
         real_user = os.environ.get("SUDO_USER")
@@ -106,11 +118,13 @@ def get_cached_cookies(
         data = json.loads(cookie_file.read_text())
 
         age = int(time.time()) - data.get("timestamp", 0)
-        if age > max_age_hours * 3600:
+        if age < 0 or age > max_age_hours * 3600:
             clear_cookies(name)
             return None
-
-        return (data.get("cookies"), data.get("usergroup"))
+        cookies = data.get("cookies")
+        if not isinstance(cookies, dict) or not cookies:
+            return None
+        return (cookies, data.get("usergroup"))
     except Exception:
         return None
 

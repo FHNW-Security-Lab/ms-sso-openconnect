@@ -28,25 +28,25 @@ fi
 
 # Prefer uv if available, fall back to pip
 if command -v uv &>/dev/null; then
-    PIP_INSTALL="uv pip install --python $VENV_DIR/bin/python"
-    VENV_CREATE="uv venv $VENV_DIR"
+    PIP_INSTALL=(uv pip install --python "$VENV_DIR/bin/python")
+    VENV_CREATE=(uv venv "$VENV_DIR")
 else
-    PIP_INSTALL="$VENV_DIR/bin/pip install -q"
-    VENV_CREATE="python3 -m venv $VENV_DIR"
+    PIP_INSTALL=("$VENV_DIR/bin/pip" install -q)
+    VENV_CREATE=(python3 -m venv "$VENV_DIR")
 fi
 
-if [ ! -d "$VENV_DIR" ]; then
+if [ ! -x "$VENV_DIR/bin/python" ]; then
     echo "Creating Python virtual environment..."
-    $VENV_CREATE
-    $PIP_INSTALL playwright keyring pyotp
-    [[ "$OSTYPE" == "linux"* ]] && $PIP_INSTALL secretstorage
-    "$VENV_DIR/bin/playwright" install chromium
-elif ! "$VENV_DIR/bin/python" -c "import keyring, pyotp" 2>/dev/null; then
-    echo "Installing additional dependencies..."
-    $PIP_INSTALL keyring pyotp
-    [[ "$OSTYPE" == "linux"* ]] && $PIP_INSTALL secretstorage
+    "${VENV_CREATE[@]}" || exit 1
 fi
-
+if ! "$VENV_DIR/bin/python" -c 'import keyring, platformdirs; from importlib.metadata import version; assert (1, 55) <= tuple(map(int, version("playwright").split(".")[:2])) < (2, 0)' 2>/dev/null; then
+    echo "Installing runtime dependencies..."
+    "${PIP_INSTALL[@]}" 'playwright>=1.55,<2' keyring platformdirs || exit 1
+    if [[ "$OSTYPE" == "linux"* ]]; then
+        "${PIP_INSTALL[@]}" secretstorage || exit 1
+    fi
+    "$VENV_DIR/bin/python" -m playwright install chromium || exit 1
+fi
 
 # Check for openconnect (only needed when connecting)
 needs_openconnect=true

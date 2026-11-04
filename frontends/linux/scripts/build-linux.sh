@@ -3,12 +3,12 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FRONTEND_DIR="$SCRIPT_DIR/.."
-REPO_ROOT="$FRONTEND_DIR/../.."
+FRONTEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$FRONTEND_DIR/../.." && pwd)"
 CODEBASE_UI_DIR="$REPO_ROOT/codebase/ui"
 CORE_DIR="$REPO_ROOT/codebase/core"
 PACKAGING_DIR="$FRONTEND_DIR/packaging"
-VERSION="${1:-2.0.0}"
+VERSION="${1:-2.1.0}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Usage: $0 [version] [appimage|deb|all]"
@@ -47,7 +47,7 @@ build_appimage() {
     # Install dependencies
     echo "Installing dependencies..."
     pip install -q --upgrade pip wheel
-    pip install -q PyQt6 keyring pyotp playwright secretstorage
+    pip install -q PyQt6 keyring platformdirs 'playwright>=1.55,<2' secretstorage
 
     # Install the UI package
     pip install -q "$CODEBASE_UI_DIR"
@@ -69,7 +69,7 @@ build_appimage() {
 APPDIR="$(dirname "$(dirname "$(readlink -f "$0")")")"
 
 export PLAYWRIGHT_BROWSERS_PATH="$APPDIR/browsers"
-export PYTHONPATH="$APPDIR/share/ms-sso-openconnect:$PYTHONPATH"
+export PYTHONPATH="$APPDIR/share/ms-sso-openconnect${PYTHONPATH:+:$PYTHONPATH}"
 export PATH="$APPDIR/venv/bin:$PATH"
 
 # Qt plugin path
@@ -122,6 +122,12 @@ build_deb() {
         return 1
     fi
 
+    if ! dpkg --validate-version "$VERSION" >/dev/null 2>&1 || [[ "$VERSION" == *-* ]]; then
+        echo "Error: expected an upstream Debian version without a revision: $VERSION" >&2
+        return 1
+    fi
+    dpkg-checkbuilddeps "$PACKAGING_DIR/debian/control"
+
     BUILD_DIR="$FRONTEND_DIR/build/deb"
     rm -rf "$BUILD_DIR"
     mkdir -p "$BUILD_DIR"
@@ -133,17 +139,42 @@ build_deb() {
     cp -r "$PACKAGING_DIR/desktop" "$BUILD_DIR/packaging/linux/"
     cp -r "$PACKAGING_DIR/polkit" "$BUILD_DIR/packaging/linux/"
     cp "$CODEBASE_UI_DIR/pyproject.toml" "$BUILD_DIR/"
+    cp "$CODEBASE_UI_DIR/README.md" "$BUILD_DIR/"
+    cp "$PACKAGING_DIR/ms-sso-openconnect-ui" "$BUILD_DIR/packaging/linux/"
+    # The requested version controls the actual package, not just its banner.
+    python3 - "$BUILD_DIR" "$VERSION" <<'PYVERSION'
+from pathlib import Path
+import re
+import sys
+root, version = Path(sys.argv[1]), sys.argv[2]
+path = root / "debian/changelog"
+path.write_text(re.sub(r"\A(ms-sso-openconnect-ui \()[^)]+", lambda m: m[1] + version + "-1", path.read_text(), count=1))
+path = root / "src/vpn_ui/__init__.py"
+path.write_text(re.sub(r'__version__ = "[^"]+"', lambda m: '__version__ = "' + version + '"', path.read_text(), count=1))
+path = root / "src/vpn_ui/constants.py"
+path.write_text(re.sub(r'^VERSION = "[^"]+"', lambda m: 'VERSION = "' + version + '"', path.read_text(), count=1, flags=re.MULTILINE))
+path = root / "pyproject.toml"
+path.write_text(re.sub(r'^version = "[^"]+"', lambda m: 'version = "' + version + '"', path.read_text(), count=1, flags=re.MULTILINE))
+PYVERSION
+    find "$BUILD_DIR/src" -type d -name __pycache__ -prune -exec rm -rf {} +
+    find "$BUILD_DIR/src" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
 
     # Copy core module
     mkdir -p "$BUILD_DIR/core"
     cp -r "$CORE_DIR/"*.py "$BUILD_DIR/core/"
 
     # Build
-    cd "$BUILD_DIR"
-    dpkg-buildpackage -us -uc -b
+    (cd "$BUILD_DIR" && dpkg-buildpackage -us -uc -b)
 
-    # Move result
-    mv "$FRONTEND_DIR/build/"*.deb "$FRONTEND_DIR/dist/"
+    # Collect only this build's package, never stale versions from a prior run.
+    PACKAGE="$FRONTEND_DIR/build/ms-sso-openconnect-ui_${VERSION}-1_all.deb"
+    test -f "$PACKAGE"
+    mv "$PACKAGE" "$FRONTEND_DIR/dist/"
+    for suffix in changes buildinfo; do
+        for metadata in "$FRONTEND_DIR/build/ms-sso-openconnect-ui_${VERSION}-1_"*."$suffix"; do
+            [[ ! -f "$metadata" ]] || mv "$metadata" "$FRONTEND_DIR/dist/"
+        done
+    done
 
     echo "Debian package created in $FRONTEND_DIR/dist/"
 }

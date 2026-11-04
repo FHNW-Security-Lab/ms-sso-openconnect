@@ -2,28 +2,47 @@ Source: ms-sso-openconnect-ui
 Section: net
 Priority: optional
 Maintainer: MS SSO OpenConnect Maintainers <maintainers@example.com>
-Build-Depends: debhelper-compat (= 13),
-               python3,
-               python3-pip,
-               python3-venv
+Build-Depends: debhelper-compat (= 13), python3
 Standards-Version: 4.6.0
 Homepage: https://github.com/FHNW-Security-Lab/ms-sso-openconnect
+Rules-Requires-Root: no
 
 Package: ms-sso-openconnect-ui
 Architecture: all
 Depends: ${misc:Depends},
          python3 (>= 3.10),
-         python3-pip,
          python3-venv,
-         openconnect,
-         libxcb-cursor0
+         python3-pyqt6 (>= 6.5),
+         python3-keyring,
+         python3-platformdirs,
+         python3-secretstorage,
+         openconnect (>= 9.12),
+         vpnc-scripts,
+         pkexec,
+         procps,
+         iproute2,
+         libxcb-cursor0,
+         libnss3,
+         libnspr4,
+         libatk1.0-0t64 | libatk1.0-0,
+         libatk-bridge2.0-0t64 | libatk-bridge2.0-0,
+         libcups2t64 | libcups2,
+         libdrm2,
+         libdbus-1-3,
+         libxkbcommon0,
+         libxcomposite1,
+         libxdamage1,
+         libxfixes3,
+         libxrandr2,
+         libgbm1,
+         libasound2t64 | libasound2,
+         libpango-1.0-0,
+         libcairo2
 Recommends: gnome-keyring | kwalletmanager
 Description: Qt6 GUI for MS SSO OpenConnect VPN
- A graphical user interface for connecting to VPN servers
- using Microsoft SSO authentication.
+ A graphical user interface for Microsoft SSO-protected VPN servers,
+ with adaptive MFA, automatic TOTP, system keyring credential storage,
+ and support for Cisco AnyConnect and GlobalProtect.
  .
- Features:
-  - System tray integration
-  - Automatic TOTP code generation
-  - Secure credential storage in system keyring
-  - Support for Cisco AnyConnect and GlobalProtect
+ Initial configuration downloads an isolated Playwright Chromium runtime.
+ Existing working runtimes are reused on upgrade.

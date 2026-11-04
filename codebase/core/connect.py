@@ -1,280 +1,322 @@
-"""VPN connection management via openconnect."""
+"""Owned OpenConnect lifecycle shared by CLI and desktop frontends.
 
+The process stays attached so failures can be retried. A per-user lease prevents
+concurrent attempts; only the interface/process recorded in that lease is touched.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import json
 import os
+from pathlib import Path
 import re
-import shlex
+import signal
+import sys
 import subprocess
-from typing import Optional
+import tempfile
+import threading
+import time
+import uuid
+from typing import Callable, Optional
 
-from .cookies import store_cookies, clear_cookies
-from .config import PROTOCOLS
-
-# Terminal colors
-GREEN = "\033[32m"
-RED = "\033[31m"
-YELLOW = "\033[33m"
-CYAN = "\033[36m"
-BOLD = "\033[1m"
-NC = "\033[0m"
+from .cookies import clear_cookies, store_cookies
+from .platform_info import get_gp_hip_report_wrapper, get_gp_os_version, get_openconnect_binary
 
 
-def _cleanup_dns_best_effort(use_pkexec: bool = False) -> None:
-    """Best-effort DNS cleanup for tun interfaces after failure/disconnect."""
-    tun_devs = set()
+def _state_dir() -> Path:
+    base = Path(os.environ.get("XDG_RUNTIME_DIR", tempfile.gettempdir()))
+    path = base / f"ms-sso-openconnect-{os.getuid()}"
+    path.mkdir(mode=0o700, exist_ok=True)
+    if path.is_symlink() or path.stat().st_uid != os.getuid():
+        raise RuntimeError("Unsafe VPN runtime directory")
+    path.chmod(0o700)
+    return path
+
+
+def _read_state() -> dict:
     try:
-        links = subprocess.run(
-            ["ip", "-o", "link", "show"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        for line in links.stdout.splitlines():
-            if ":" not in line:
-                continue
-            parts = line.split(":", 2)
-            if len(parts) < 2:
-                continue
-            dev = parts[1].strip()
-            if dev.startswith("tun"):
-                tun_devs.add(dev)
-    except Exception:
-        pass
-
-    if not tun_devs:
-        tun_devs.add("tun0")
-
-    def _run_cleanup_cmd(cmd: list[str]) -> None:
-        candidates = [cmd]
-        if use_pkexec:
-            candidates.append(["pkexec"] + cmd)
-        else:
-            candidates.append(["sudo", "-n"] + cmd)
-
-        for full_cmd in candidates:
-            try:
-                subprocess.run(full_cmd, capture_output=True, text=True, check=False, timeout=5)
-            except Exception:
-                continue
-
-    for dev in sorted(tun_devs):
-        _run_cleanup_cmd(["resolvectl", "revert", dev])
-        _run_cleanup_cmd(["resolvconf", "-d", dev])
+        state = json.loads((_state_dir() / "session.json").read_text())
+        return state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
-def connect_vpn(
-    vpn_server: str,
-    protocol: str,
-    cookies: dict,
-    no_dtls: bool = False,
-    username: Optional[str] = None,
-    allow_fallback: bool = False,
-    connection_name: Optional[str] = None,
-    cached_usergroup: Optional[str] = None,
-    use_pkexec: bool = False,
-) -> bool:
-    """Connect to VPN using openconnect with the obtained cookie.
-
-    Args:
-        vpn_server: VPN server hostname
-        protocol: Protocol ('anyconnect' or 'gp')
-        cookies: Cookie dictionary from SAML auth
-        no_dtls: Disable DTLS
-        username: Username for GlobalProtect
-        allow_fallback: Use subprocess so we can return on failure
-        connection_name: Connection name for updating cookie cache
-        cached_usergroup: Cached usergroup from previous connection
-        use_pkexec: Use pkexec instead of sudo (for GUI without terminal)
-
-    Returns:
-        True if connection succeeded, False otherwise
-    """
-    print(f"\n{GREEN}Connecting to VPN...{NC}\n")
-
-    proto_flag = PROTOCOLS.get(protocol, {}).get("flag", "anyconnect")
-
-    # Track which cookie type we're using for --usergroup
-    gp_cookie_type = None
-
-    # Check if we have a gateway IP (GlobalProtect)
-    gateway_target = cookies.pop('_gateway_ip', None) if protocol == "gp" else None
-
-    if protocol == "gp":
-        # GlobalProtect with SAML: prelogin-cookie from SAML response
-        if cached_usergroup:
-            print(f"  Using cached usergroup: {cached_usergroup}")
-            gp_cookie_type = cached_usergroup
-            if 'portal-userauthcookie' in cookies:
-                cookie_str = cookies['portal-userauthcookie']
-                print(f"  Using portal-userauthcookie (long-lived)")
-            elif 'prelogin-cookie' in cookies:
-                cookie_str = cookies['prelogin-cookie']
-                print(f"  Using prelogin-cookie")
-            else:
-                cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
-                print(f"  Using combined cookies")
-        elif 'prelogin-cookie' in cookies:
-            cookie_str = cookies['prelogin-cookie']
-            gp_cookie_type = 'portal:prelogin-cookie'
-            print(f"  Using prelogin-cookie (portal mode)")
-        elif 'portal-userauthcookie' in cookies:
-            cookie_str = cookies['portal-userauthcookie']
-            gp_cookie_type = 'portal:portal-userauthcookie'
-            print(f"  Using portal-userauthcookie (portal mode)")
-        elif 'SAMLResponse' in cookies:
-            cookie_str = cookies['SAMLResponse']
-            gp_cookie_type = 'prelogin-cookie'
-            print(f"  Using SAMLResponse ({len(cookie_str)} chars) - may not work")
-        elif 'SESSID' in cookies:
-            cookie_str = cookies['SESSID']
-            gp_cookie_type = 'portal-userauthcookie'
-            print(f"  Using SESSID - may not work for GP SAML")
-        else:
-            cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
-            gp_cookie_type = 'portal-userauthcookie'
-            print(f"  Using combined cookies")
-    else:
-        # AnyConnect uses name=value format
-        cookie_str = "; ".join([f"{k}={v}" for k, v in cookies.items()])
-
-    connect_target = vpn_server
-
-    # For GP with SAML, use --passwd-on-stdin (like gp-saml-gui)
-    use_stdin_cookie = protocol == "gp" and 'prelogin-cookie' in cookies
-
-    if use_stdin_cookie:
-        cmd = [
-            "openconnect",
-            "--verbose",
-            f"--protocol={proto_flag}",
-            "--passwd-on-stdin",
-            connect_target,
-        ]
-    else:
-        cmd = [
-            "openconnect",
-            "--verbose",
-            f"--protocol={proto_flag}",
-            f"--cookie={cookie_str}",
-            connect_target,
-        ]
-
-    # Add options for GlobalProtect
-    if protocol == "gp":
-        cmd.insert(2, "--os=linux-64")
-        cmd.insert(2, "--useragent=PAN GlobalProtect")
-        if username:
-            cmd.insert(2, f"--user={username}")
-        if gp_cookie_type:
-            cmd.insert(2, f"--usergroup={gp_cookie_type}")
-
-    if no_dtls:
-        cmd.insert(2, "--no-dtls")
-
-    # Display command (for user visibility)
-    display_cmd = f"openconnect --verbose --protocol={proto_flag}"
-    if no_dtls:
-        display_cmd += " --no-dtls"
-    if protocol == "gp":
-        display_cmd += " --useragent='PAN GlobalProtect' --os=linux-64"
-        if gp_cookie_type:
-            display_cmd += f" --usergroup={gp_cookie_type}"
-        if username:
-            display_cmd += f" --user={username}"
-    if use_stdin_cookie:
-        display_cmd += f" --passwd-on-stdin {connect_target}"
-        print(f"  Running: echo '<cookie>' | {display_cmd}")
-    else:
-        display_cmd += f" --cookie=<session> {connect_target}"
-        print(f"  Running: {display_cmd}")
-    print()
-
-    if use_stdin_cookie:
-        # Determine privilege escalation command
-        if use_pkexec:
-            priv_cmd = ["pkexec"] + cmd
-        else:
-            # Cache sudo credentials before redirecting stdin
-            subprocess.run(["sudo", "-v"], check=True)
-            priv_cmd = ["sudo"] + cmd
-
-        # Create pipe for stdin
-        read_fd, write_fd = os.pipe()
-        cookie_bytes = (cookie_str + '\n').encode()
-        os.write(write_fd, cookie_bytes)
-        os.close(write_fd)
-
-        # Run openconnect with stdin from pipe
-        process = subprocess.Popen(
-            priv_cmd,
-            stdin=read_fd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-        os.close(read_fd)
-
-        # Read stdout and look for portal-userauthcookie
-        portal_cookie = None
+def _owned_pids(state: dict) -> list[int]:
+    """Match the exact generated interface, never every OpenConnect process."""
+    interface = state.get("interface", "")
+    binary = state.get("binary", "")
+    if not re.fullmatch(r"msso[0-9a-f]{10}", interface) or not binary:
+        return []
+    matches = []
+    for entry in Path("/proc").glob("[0-9]*"):
         try:
-            for line in process.stdout:
-                print(line, end='')
+            args = (entry / "cmdline").read_bytes().split(b"\0")
+            if not args:
+                continue
+            executable = os.fsdecode(args[0])
+            if (os.path.basename(executable) == os.path.basename(binary)
+                    and f"--interface={interface}".encode() in args):
+                matches.append(int(entry.name))
+        except (OSError, ValueError):
+            continue
+    return matches
 
-                if 'portal-userauthcookie=' in line and protocol == "gp":
-                    match = re.search(r'portal-userauthcookie=(\S+)', line)
-                    if match:
-                        portal_cookie = match.group(1)
-                        if portal_cookie.lower() != 'empty':
-                            print(f"\n    [DEBUG] Captured portal-userauthcookie")
-        except KeyboardInterrupt:
-            process.terminate()
 
-        returncode = process.wait()
-
-        # Update cache with long-lived cookie
-        if portal_cookie and connection_name and portal_cookie.lower() != 'empty':
-            print(f"\n{GREEN}Updating cache with long-lived portal-userauthcookie...{NC}")
-            new_cookies = {'portal-userauthcookie': portal_cookie}
-            store_cookies(connection_name, new_cookies, usergroup='portal:portal-userauthcookie')
-    else:
-        # Use sudo/pkexec for openconnect
-        if use_pkexec:
-            priv_cmd = ["pkexec"] + cmd
-        else:
-            priv_cmd = ["sudo"] + cmd
-        process = subprocess.Popen(priv_cmd)
-        returncode = process.wait()
-
-    if returncode != 0:
-        _cleanup_dns_best_effort(use_pkexec=use_pkexec)
-        print(f"\n{YELLOW}Connection failed (exit code {returncode}).{NC}")
+def _tunnel_ready(interface: str) -> bool:
+    try:
+        result = subprocess.run(["ip", "-j", "addr", "show", "dev", interface],
+                                capture_output=True, text=True, timeout=3)
+        links = json.loads(result.stdout or "[]")
+        return result.returncode == 0 and any(
+            addr.get("scope") == "global" and addr.get("local")
+            for link in links for addr in link.get("addr_info", [])
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return False
+
+
+def is_connected() -> bool:
+    state = _read_state()
+    return bool(state and _owned_pids(state) and _tunnel_ready(state["interface"]))
+
+
+def active_connection_name() -> Optional[str]:
+    return _read_state().get("connection_name") if is_connected() else None
+
+
+def _signal_owned(state: dict, signum: int, use_pkexec: bool) -> bool:
+    pids = _owned_pids(state)
+    for pid in pids:
+        # Recheck immediately before signalling in case teardown raced us.
+        if pid not in _owned_pids(state):
+            continue
+        try:
+            os.kill(pid, signum)
+        except PermissionError:
+            command = ["/usr/bin/kill", f"-{signum}", str(pid)]
+            prefix = ["pkexec"] if use_pkexec else ["sudo"]
+            try:
+                result = subprocess.run(prefix + command, capture_output=True, timeout=60)
+            except (OSError, subprocess.TimeoutExpired):
+                return False
+            if result.returncode:
+                return False
+        except ProcessLookupError:
+            pass
     return True
 
 
-def disconnect(force: bool = False) -> bool:
-    """Kill any running openconnect process.
-
-    Args:
-        force: If True, also clear session cookies
-
-    Returns:
-        True if process was killed
-    """
-    signal_flag = "-TERM" if force else "-KILL"
-    result = subprocess.run(
-        ["sudo", "pkill", signal_flag, "-f", "openconnect"],
-        capture_output=True
-    )
-    if result.returncode == 0:
-        _cleanup_dns_best_effort(use_pkexec=False)
+def disconnect(force: bool = False, use_pkexec: bool = False, *, _mark_intent: bool = True) -> bool:
+    """Stop our own tunnel gracefully, allowing vpnc-script to restore networking."""
+    if sys.platform == "darwin":
+        from ._connect_macos import disconnect as mac_disconnect
+        return mac_disconnect(force)
+    state = _read_state()
+    if not state:
         if force:
             clear_cookies()
-            print(f"{GREEN}VPN disconnected and session terminated.{NC}")
-        else:
-            print(f"{GREEN}VPN disconnected (session kept alive for reconnect).{NC}")
         return True
-    else:
-        _cleanup_dns_best_effort(use_pkexec=False)
-        print(f"{YELLOW}No active VPN connection found.{NC}")
+    if _mark_intent:
+        (_state_dir() / "stop").write_text(state.get("interface", ""))
+    if not _signal_owned(state, signal.SIGTERM if force else signal.SIGINT, use_pkexec):
         return False
+    deadline = time.monotonic() + 15
+    while _owned_pids(state) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    # Do not SIGKILL: that skips OpenConnect's route/DNS teardown script.
+    stopped = not _owned_pids(state)
+    if stopped and force:
+        clear_cookies()
+    return stopped
+
+
+def select_gp_cookie(cookies: dict, auth_interface: str = "portal") -> tuple[str, str]:
+    if auth_interface == "gateway":
+        if cookies.get("prelogin-cookie"):
+            return str(cookies["prelogin-cookie"]), "gateway:prelogin-cookie"
+        raise ValueError("GlobalProtect gateway authentication returned no prelogin cookie")
+    for key in ("portal-userauthcookie", "prelogin-cookie"):
+        if cookies.get(key):
+            return str(cookies[key]), f"portal:{key}"
+    raise ValueError("GlobalProtect authentication returned no usable cookie")
+
+
+def build_anyconnect_cookie_header(cookies: dict) -> str:
+    parts = []
+    for raw_name, raw_value in cookies.items():
+        name, value = str(raw_name).strip(), str(raw_value)
+        if (not name or name.startswith("_") or name.casefold() in {"samlresponse", "saml-username"}
+                or any(c in name or c in value for c in "\r\n")):
+            continue
+        parts.append(f"{name}={value}")
+    if not parts:
+        raise ValueError("AnyConnect authentication returned no usable cookies")
+    return "; ".join(parts)
+
+
+def _private_input(payload: bytes):
+    """Seekable stdin survives sudo/pkexec fd closing and has no pipe size limit.
+
+    AnyConnect reads this as a config, avoiding cookie-on-stdin's line limit.
+    The temporary file is unlinked immediately and never named in argv.
+    """
+    stream = (os.fdopen(os.memfd_create("ms-sso-cookie", os.MFD_CLOEXEC), "w+b")
+              if hasattr(os, "memfd_create") else tempfile.TemporaryFile())
+    stream.write(payload)
+    stream.seek(0)
+    return stream
+
+
+def _redact_output(line: str) -> str:
+    return re.sub(r"(?i)((?:set-cookie|cookie|portal-userauthcookie|prelogin-cookie|webvpn)[=:]\s*)[^\n]*",
+                  r"\1<redacted>", line)
+
+
+def connect_vpn(
+    vpn_server: str, protocol: str, cookies: dict, no_dtls: bool = False,
+    username: Optional[str] = None, allow_fallback: bool = False,
+    connection_name: Optional[str] = None, cached_usergroup: Optional[str] = None,
+    use_pkexec: bool = False, cancel_callback: Optional[Callable[[], bool]] = None,
+    connected_callback: Optional[Callable[[], None]] = None,
+    progress_callback: Optional[Callable[[str], None]] = None,
+    gp_auth_interface: str = "portal", gp_os_version: Optional[str] = None,
+    disconnect_force_callback: Optional[Callable[[], bool]] = None,
+) -> bool:
+    """Run an owned tunnel until it stops; True means intentional disconnection.
+
+    ``connected_callback`` fires once the assigned interface has a global address.
+    False means failed/expired session (including exit 0), so callers can reconnect.
+    """
+    if sys.platform == "darwin":
+        from ._connect_macos import connect_vpn as mac_connect
+        return mac_connect(vpn_server, protocol, cookies.copy(), no_dtls, username,
+                           allow_fallback, connection_name, cached_usergroup, use_pkexec)
+    if protocol not in {"anyconnect", "gp"}:
+        raise ValueError(f"Unsupported VPN protocol: {protocol}")
+    if cancel_callback and cancel_callback():
+        return True
+    directory = _state_dir()
+    with (directory / "lock").open("a") as lease:
+        try:
+            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("Another VPN connection attempt is active")
+        old = _read_state()
+        if old and _owned_pids(old):
+            raise RuntimeError("An owned VPN tunnel is already active; disconnect it first")
+        (directory / "stop").unlink(missing_ok=True)
+        interface = "msso" + uuid.uuid4().hex[:10]
+        binary = get_openconnect_binary(protocol)
+        cmd = [binary, "--verbose", f"--protocol={protocol}", f"--interface={interface}",
+               "--non-inter", "--reconnect-timeout=300", f"--force-dpd={10 if protocol == 'gp' else 30}"]
+        if no_dtls:
+            cmd.append("--no-dtls")
+        env = os.environ.copy()
+        if protocol == "gp":
+            # Only the validated auth-interface chooses portal vs gateway mode.
+            cookie, group = select_gp_cookie(cookies, gp_auth_interface)
+            if any(c in cookie for c in "\r\n"):
+                raise ValueError("GlobalProtect cookie contains a line break")
+            payload = (cookie + "\n").encode()
+            cmd.extend(["--passwd-on-stdin", "--useragent=PAN GlobalProtect", "--os=linux-64",
+                        f"--usergroup={group}"])
+            gp_username = cookies.get("saml-username") or username
+            if gp_username:
+                cmd.append(f"--user={gp_username}")
+            hip_wrapper = get_gp_hip_report_wrapper()
+            if hip_wrapper:
+                cmd.append(f"--csd-wrapper={hip_wrapper}")
+            env["MS_SSO_GP_OS_VERSION"] = (gp_os_version if gp_os_version and gp_os_version.lower() != "auto"
+                                            else get_gp_os_version())
+        else:
+            payload = ("cookie=" + build_anyconnect_cookie_header(cookies) + "\n").encode()
+            cmd.append("--config=/dev/stdin")
+        cmd.append(vpn_server)
+        state = {"interface": interface, "binary": binary, "connection_name": connection_name}
+        (directory / "session.json").write_text(json.dumps(state))
+        process = None
+        intentional = False
+        try:
+            if os.geteuid() != 0:
+                if not use_pkexec:
+                    subprocess.run(["sudo", "-v"], check=True)
+                if protocol == "gp":
+                    # Elevation filters environment; forward only this explicit
+                    # non-secret HIP identity as an argv element, without a shell.
+                    cmd = ["/usr/bin/env", "MS_SSO_GP_OS_VERSION=" + env["MS_SSO_GP_OS_VERSION"], *cmd]
+                cmd.insert(0, "pkexec" if use_pkexec else "sudo")
+            with _private_input(payload) as stdin:
+                process = subprocess.Popen(cmd, stdin=stdin, stdout=subprocess.PIPE,
+                                           stderr=subprocess.STDOUT, env=env)
+            # A dedicated reader preserves split lines and does not block cancellation
+            # or readiness when OpenConnect emits no console output.
+            def read_output():
+                try:
+                    for raw in iter(process.stdout.readline, b""):
+                        line = raw.decode(errors="replace")
+                        print(_redact_output(line), end="", flush=True)
+                        if protocol == "gp" and gp_auth_interface == "portal" and connection_name:
+                            match = re.search(r"portal-userauthcookie=(\S+)", line)
+                            if match and match[1].lower() != "empty":
+                                store_cookies(connection_name, {"portal-userauthcookie": match[1],
+                                                               "saml-username": gp_username or ""},
+                                              usergroup="portal:portal-userauthcookie")
+                except (OSError, ValueError):
+                    pass
+            reader = threading.Thread(target=read_output, daemon=True)
+            reader.start()
+            try:
+                timeout = max(15, min(600, int(os.environ.get("MS_SSO_TUNNEL_TIMEOUT", "180"))))
+            except ValueError:
+                timeout = 180
+            deadline = time.monotonic() + timeout
+            ready = False
+            while process.poll() is None:
+                stop_requested = (directory / "stop").exists()
+                if stop_requested or (cancel_callback and cancel_callback()):
+                    intentional = True
+                    force = bool(disconnect_force_callback and disconnect_force_callback())
+                    disconnect(force=force, use_pkexec=use_pkexec)
+                    # A pending privilege prompt is still owned by our user.
+                    if process.poll() is None and not _owned_pids(state):
+                        try:
+                            process.terminate()
+                        except (PermissionError, ProcessLookupError):
+                            pass
+                    break
+                if not ready and _tunnel_ready(interface):
+                    ready = True
+                    if progress_callback:
+                        progress_callback("VPN tunnel established")
+                    if connected_callback:
+                        connected_callback()
+                if not ready and time.monotonic() >= deadline:
+                    if progress_callback:
+                        progress_callback("VPN tunnel setup timed out")
+                    disconnect(use_pkexec=use_pkexec, _mark_intent=False)
+                    if process.poll() is None and not _owned_pids(state):
+                        try:
+                            process.terminate()
+                        except (PermissionError, ProcessLookupError):
+                            pass
+                    break
+                time.sleep(0.2)
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("VPN process did not stop; refusing an overlapping reconnect")
+            reader.join(timeout=2)
+            # External --disconnect can race process exit; honor its recorded intent.
+            intentional = intentional or (directory / "stop").exists()
+            return intentional
+        except KeyboardInterrupt:
+            disconnect(use_pkexec=use_pkexec)
+            return True
+        finally:
+            # An exception must not abandon an owned tunnel and start another one.
+            if process is not None and process.poll() is None:
+                _signal_owned(state, signal.SIGINT, use_pkexec)
+            if not _owned_pids(state):
+                (directory / "session.json").unlink(missing_ok=True)
+                (directory / "stop").unlink(missing_ok=True)

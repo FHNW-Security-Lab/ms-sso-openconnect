@@ -61,6 +61,7 @@ def save_connection(
         username: str,
         password: str,
         totp_secret: str,
+        **options,
 ) -> bool:
     """Save a VPN connection.
 
@@ -76,14 +77,34 @@ def save_connection(
         True if saved successfully
     """
     connections = get_connections()
-    connections[name] = {
+    old = connections.get(name, {})
+    updated = dict(old)
+    updated.update({
         "address": address,
         "protocol": protocol,
         "username": username,
         "password": password,
         "totp_secret": totp_secret,
-    }
-    return _save_connections(connections)
+    })
+    allowed = {"mfa_preference", "gp_auth_interface", "gp_os_version", "auto_reconnect"}
+    if set(options) - allowed:
+        raise ValueError("Unknown connection option")
+    updated.update(options)
+    if updated.get("mfa_preference", "auto") not in {"auto", "push", "totp"}:
+        raise ValueError("Invalid MFA preference")
+    if updated.get("gp_auth_interface", "portal") not in {"portal", "gateway"}:
+        raise ValueError("Invalid GlobalProtect authentication interface")
+    if not isinstance(updated.get("auto_reconnect", True), bool):
+        raise ValueError("Automatic reconnect must be a boolean")
+    connections[name] = updated
+    if not _save_connections(connections):
+        return False
+    # An edited profile must not reuse a cookie issued to a different account,
+    # gateway, authentication method, or password.
+    if old and any(old.get(key) != updated.get(key) for key in updated if key != "auto_reconnect"):
+        from .cookies import clear_cookies
+        clear_cookies(name)
+    return True
 
 
 def delete_connection(name: str) -> bool:
@@ -98,7 +119,8 @@ def delete_connection(name: str) -> bool:
     connections = get_connections()
     if name in connections:
         del connections[name]
-        _save_connections(connections)
+        if not _save_connections(connections):
+            return False
         # Also clear cookies
         from .cookies import clear_cookies
         clear_cookies(name)

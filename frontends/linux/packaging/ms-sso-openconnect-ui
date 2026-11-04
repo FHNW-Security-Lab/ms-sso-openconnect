@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+INSTALL_DIR=/opt/ms-sso-openconnect-ui
+export PLAYWRIGHT_BROWSERS_PATH="$INSTALL_DIR/browsers"
+export PYTHONPATH="$INSTALL_DIR/src:$INSTALL_DIR${PYTHONPATH:+:$PYTHONPATH}"
+exec "$INSTALL_DIR/venv/bin/python" -m vpn_ui "$@"

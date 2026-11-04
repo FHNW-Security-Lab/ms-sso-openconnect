@@ -2,7 +2,7 @@
 
 python3Packages.buildPythonPackage rec {
   pname = "ms-sso-openconnect-core";
-  version = "2.0.0";
+  version = "2.1.0";
   format = "other";
 
   src = lib.cleanSource ../.;
@@ -11,7 +11,7 @@ python3Packages.buildPythonPackage rec {
 
   propagatedBuildInputs = with python3Packages; [
     keyring
-    pyotp
+    platformdirs
     playwright
     secretstorage
   ];

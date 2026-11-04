@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ms-sso-openconnect-ui"
-version = "2.0.0"
+version = "2.1.0"
 description = "GUI for MS SSO OpenConnect VPN client"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -30,8 +30,8 @@ classifiers = [
 dependencies = [
     "PyQt6>=6.5.0",
     "keyring>=24.0.0",
-    "pyotp>=2.8.0",
-    "playwright>=1.40.0",
+    "platformdirs>=3.0.0",
+    "playwright>=1.55,<2",
 ]
 
 [project.optional-dependencies]

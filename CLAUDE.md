@@ -37,7 +37,7 @@ frontends/osx/          # macOS packaging/build frontend (+ daemon)
 - All frontends import from `codebase/core/` - never duplicate core logic
 - UI uses platform detection (`sys.platform`) for Linux/macOS differences
 - macOS uses LaunchDaemon for passwordless VPN connections (SIGTERM for graceful shutdown)
-- Linux uses pkexec for privilege escalation (SIGKILL for fast disconnect)
+- Linux uses pkexec for privilege escalation and graceful signals for its tracked tunnel
 
 ## Build Commands
 
@@ -60,7 +60,7 @@ chmod +x ms-sso-openconnect
 ## Testing
 
 ```bash
-pytest codebase/ui/tests/     # Run all tests (when available)
+QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests
 python -m vpn_ui              # Run UI from source
 ```
 
@@ -83,7 +83,8 @@ python -m vpn_ui              # Run UI from source
 
 **Linux Privilege Escalation**:
 - Uses pkexec (PolicyKit) for GUI password prompts
-- Uses SIGKILL for fast disconnect (keeps session alive for reconnect)
+- Uses SIGINT or SIGTERM for graceful disconnect, allowing vpnc-script cleanup
+- Tracks an owned interface and serializes connection attempts; never kills unrelated VPNs
 
 **Cookie Storage**:
 - Linux: `~/.cache/ms-sso-openconnect-ui/`
