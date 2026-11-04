@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ms-sso-openconnect-ui"
-version = "2.1.4"
+version = "2.1.5"
 description = "GUI for MS SSO OpenConnect VPN client"
 readme = "README.md"
 requires-python = ">=3.10"

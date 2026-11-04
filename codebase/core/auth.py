@@ -1029,11 +1029,16 @@ class _SensitiveDispatchEvidenceTracker:
             and port in {None, 443}
             and _is_known_microsoft_telemetry_host(parsed.hostname)
             and method == "POST"
-            and resource_type in {"fetch", "xhr"}
+            and resource_type in {"fetch", "xhr", "ping"}
             and not is_navigation_request
             and cls._structured_payload_is_credential_free(
                 serialized,
                 expected_secret,
+            )
+            and (
+                resource_type != "ping"
+                or cls._request_payload_shape(request)
+                in {"json-object", "json-list", "json-stream"}
             )
         )
 

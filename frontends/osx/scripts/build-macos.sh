@@ -8,7 +8,7 @@ REPO_ROOT="$FRONTEND_DIR/../.."
 CODEBASE_UI_DIR="$REPO_ROOT/codebase/ui"
 CORE_DIR="$REPO_ROOT/codebase/core"
 DAEMON_SRC_DIR="$REPO_ROOT/frontends/osx/daemon"
-VERSION="${1:-2.1.4}"
+VERSION="${1:-2.1.5}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Usage: $0 [version]"
@@ -255,10 +255,18 @@ set -euo pipefail
 LABEL=com.github.ms-sso-openconnect.daemon
 # launchd stops its owned helper gracefully; do not kill unrelated VPNs.
 launchctl bootout "system/$LABEL" 2>/dev/null || true
-if launchctl print "system/$LABEL" >/dev/null 2>&1; then
-    echo "The previous VPN helper could not be stopped." >&2
-    exit 1
-fi
+# bootout can return before shutdown finishes. Allow the plist's 30-second
+# ExitTimeOut plus a small margin before replacing the helper or its socket.
+for attempt in {0..35}; do
+    if ! launchctl print "system/$LABEL" >/dev/null 2>&1; then
+        break
+    fi
+    if (( attempt == 35 )); then
+        echo "The previous VPN helper could not be stopped." >&2
+        exit 1
+    fi
+    sleep 1
+done
 rm -f /var/run/ms-sso-openconnect/daemon.sock
 # Remove the legacy script only; new packages install a self-contained directory.
 rm -f /Library/PrivilegedHelperTools/ms-sso-openconnect-daemon
