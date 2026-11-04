@@ -372,7 +372,8 @@ _AUTH_UI_SNAPSHOT_SCRIPT = r"""
             rect.width > 0 && rect.height > 0;
     };
     const traits = (element) => ({
-        text: (element.innerText || element.textContent || '').slice(0, 500),
+        text: (typeof element.innerText === 'string'
+            ? element.innerText : (element.textContent || '')).slice(0, 500),
         tagName: element.tagName.toLowerCase(),
         role: element.getAttribute('role') || '',
         inputType: element.getAttribute('type') || '',
@@ -422,6 +423,48 @@ _AUTH_UI_SNAPSHOT_SCRIPT = r"""
     };
 }
 """
+
+
+_TOP_PAGE_CREDENTIAL_ERROR_SCRIPT = r"""
+credentialErrorMarkers => {
+    const visible = candidate => {
+        if (!candidate) return false;
+        const style = getComputedStyle(candidate);
+        const rect = candidate.getBoundingClientRect();
+        return style.display !== 'none' && style.visibility !== 'hidden' &&
+            rect.width > 0 && rect.height > 0;
+    };
+    const invalid = Array.from(document.querySelectorAll(
+        "input[type='password'][aria-invalid='true']"
+    )).some(visible);
+    const rendered = ['#passwordError', '#usernameError', '#passwordErrorText']
+        .some(selector => Array.from(document.querySelectorAll(selector)).some(
+            candidate => visible(candidate) && Boolean((
+                typeof candidate.innerText === 'string'
+                    ? candidate.innerText : (candidate.textContent || '')
+            ).trim())
+        ));
+    const normalizedBody = (
+        document.body && document.body.innerText ? document.body.innerText : ''
+    ).toLocaleLowerCase();
+    const markerError = credentialErrorMarkers.some(marker =>
+        normalizedBody.includes(String(marker).toLocaleLowerCase())
+    );
+    return invalid || rendered || markerError;
+}
+"""
+
+
+def _probe_top_page_credential_error(page) -> Optional[bool]:
+    """Return observed error state, or None when navigation prevents inspection."""
+    try:
+        result = page.evaluate(
+            _TOP_PAGE_CREDENTIAL_ERROR_SCRIPT,
+            list(MICROSOFT_CREDENTIAL_ERROR_MARKERS),
+        )
+        return result if isinstance(result, bool) else None
+    except Exception:
+        return None
 
 
 def _sanitize_auth_ui_frame_payload(url: str, payload: object) -> dict:
@@ -4571,7 +4614,8 @@ def do_saml_auth(
                         ].some(selector => Array.from(
                             document.querySelectorAll(selector)
                         ).some(candidate => visible(candidate) &&
-                            Boolean((candidate.innerText || candidate.textContent || '').trim())
+                            Boolean((typeof candidate.innerText === 'string'
+                                ? candidate.innerText : (candidate.textContent || '')).trim())
                         ));
                         const normalizedBody = (
                             document.body && document.body.innerText
@@ -4631,44 +4675,9 @@ def do_saml_auth(
                 return None
             return _canonical_https_origin(origin)
 
-        def _top_page_credential_error_visible() -> bool:
-            """Atomically probe language-independent top-frame error state."""
-            try:
-                return bool(page.evaluate(
-                    """credentialErrorMarkers => {
-                        const visible = candidate => {
-                            if (!candidate) return false;
-                            const style = getComputedStyle(candidate);
-                            const rect = candidate.getBoundingClientRect();
-                            return style.display !== 'none' &&
-                                style.visibility !== 'hidden' &&
-                                rect.width > 0 && rect.height > 0;
-                        };
-                        const invalid = Array.from(document.querySelectorAll(
-                            "input[type='password'][aria-invalid='true']"
-                        )).some(visible);
-                        const rendered = [
-                            '#passwordError',
-                            '#usernameError',
-                            '#passwordErrorText',
-                        ].some(selector => Array.from(
-                            document.querySelectorAll(selector)
-                        ).some(candidate => visible(candidate) &&
-                            Boolean((candidate.innerText || candidate.textContent || '').trim())
-                        ));
-                        const normalizedBody = (
-                            document.body && document.body.innerText
-                                ? document.body.innerText : ''
-                        ).toLocaleLowerCase();
-                        const markerError = credentialErrorMarkers.some(marker =>
-                            normalizedBody.includes(String(marker).toLocaleLowerCase())
-                        );
-                        return invalid || rendered || markerError;
-                    }""",
-                    list(MICROSOFT_CREDENTIAL_ERROR_MARKERS),
-                ))
-            except Exception:
-                return True
+        def _top_page_credential_error_visible() -> Optional[bool]:
+            """Distinguish observed rejection from an unreadable browser page."""
+            return _probe_top_page_credential_error(page)
 
         def _submitter_form_security_evidence(action_loc) -> tuple[
             Optional[str],
@@ -4806,7 +4815,7 @@ def do_saml_auth(
                 or not control.value_known
                 or control.value_empty != require_empty
                 or control.credential_error_visible
-                or top_error_visible
+                or top_error_visible is not False
                 or sensitive_dispatch_evidence.pending_main_frame_navigation_count
                 > 0
                 or (
@@ -5563,6 +5572,7 @@ def do_saml_auth(
             form_submission_kind = None
             form_submission_hard_deadline = 0.0
             sensitive_submission_started = False
+            credential_inspection_deadline = None
 
             def _recover_stale_browser_ui(
                 now: float,
@@ -5959,6 +5969,35 @@ def do_saml_auth(
                     if password_action_attempts > 0
                     else False
                 )
+                if top_credential_error_visible is None:
+                    # The callback can complete during the failing browser
+                    # read. Accepted auth artifacts take precedence over UI
+                    # inspection timeouts, including at their deadline.
+                    if _auth_capture_complete():
+                        break
+                    # A navigation can invalidate evaluate() without the IdP
+                    # rejecting anything. Keep the submitted action latched:
+                    # no replacement authorization, fills, clicks, or reloads
+                    # may run until a fresh inspection succeeds.
+                    inspection_now = time.monotonic()
+                    if credential_inspection_deadline is None:
+                        credential_inspection_deadline = min(
+                            deadline,
+                            inspection_now + SAML_UI_STALL_WINDOW_SECONDS,
+                            form_submission_hard_deadline
+                            if form_submission_hard_deadline > 0.0 else deadline,
+                        )
+                        _report_progress("saml-ui-inspection-unavailable")
+                    if inspection_now >= credential_inspection_deadline:
+                        _raise_profile_stall(
+                            "Could not inspect the sign-in page after submission; "
+                            "the authentication outcome is uncertain",
+                        )
+                    _interruptible_pause(min(
+                        0.1, credential_inspection_deadline - inspection_now,
+                    ))
+                    continue
+                credential_inspection_deadline = None
                 current_page_is_microsoft = bool(
                     current_top_origin == "https://login.microsoftonline.com"
                 )
@@ -5999,7 +6038,7 @@ def do_saml_auth(
                 credential_error_visible = bool(
                     credential_error_visible
                     or password_security.credential_error_visible
-                    or top_credential_error_visible
+                    or top_credential_error_visible is True
                 )
                 same_password_control = bool(
                     usable_password_input is not None
@@ -8523,6 +8562,16 @@ def do_saml_auth(
                             if debug:
                                 print(f"    [DEBUG] Microsoft login reload failed: {reload_error}")
                     _wait_until_ready(0.1)
+
+            if (
+                credential_inspection_deadline is not None
+                and not _auth_capture_complete()
+                and not _is_vpn_url(page.url)
+            ):
+                _raise_profile_stall(
+                    "Could not inspect the sign-in page after submission; "
+                    "the authentication outcome is uncertain",
+                )
 
             if (
                 form_submission_fingerprint is not None

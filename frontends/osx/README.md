@@ -47,7 +47,7 @@ Use the canonical build wrapper:
 ```
 
 Artifacts are collected in `dist/osx/pkg/` with the architecture in the filename,
-for example `MS-SSO-OpenConnect-2.1.2-macos-arm64.pkg`. Build with a Python
+for example `MS-SSO-OpenConnect-2.1.3-macos-arm64.pkg`. Build with a Python
 interpreter matching the Mac's architecture; the output is not a universal
 Intel/Apple Silicon package.
 
@@ -57,7 +57,7 @@ example, with uv installed:
 
 ```bash
 uv python install 3.13
-PYTHON_BIN="$(uv python find --managed-python 3.13)" ./frontends/osx/build.sh 2.1.2
+PYTHON_BIN="$(uv python find --managed-python 3.13)" ./frontends/osx/build.sh 2.1.3
 ```
 
 The minimum macOS version is inferred from the native binaries in the app and
