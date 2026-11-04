@@ -31,6 +31,13 @@ browser authentication and the subsequent VPN connection; a gateway prelogin
 cookie is not reused for reconnects. Leave **GP OS Version** empty for automatic
 OS reporting unless the gateway requires an explicit compatibility value.
 
+Normal GlobalProtect connections on macOS show the sign-in browser. Saved
+credentials and a configured TOTP secret are still handled automatically;
+showing the browser does not require manually entering the verification code.
+The profile's automatic reconnect setting continues to apply. **Connect with
+browser** and the error dialog's **Retry with browser** start a single explicit
+sign-in attempt without reusing saved VPN cookies.
+
 ## Build
 
 Use the canonical build wrapper:
@@ -40,7 +47,7 @@ Use the canonical build wrapper:
 ```
 
 Artifacts are collected in `dist/osx/pkg/` with the architecture in the filename,
-for example `MS-SSO-OpenConnect-2.1.1-macos-arm64.pkg`. Build with a Python
+for example `MS-SSO-OpenConnect-2.1.2-macos-arm64.pkg`. Build with a Python
 interpreter matching the Mac's architecture; the output is not a universal
 Intel/Apple Silicon package.
 
@@ -50,7 +57,7 @@ example, with uv installed:
 
 ```bash
 uv python install 3.13
-PYTHON_BIN="$(uv python find --managed-python 3.13)" ./frontends/osx/build.sh 2.1.1
+PYTHON_BIN="$(uv python find --managed-python 3.13)" ./frontends/osx/build.sh 2.1.2
 ```
 
 The minimum macOS version is inferred from the native binaries in the app and

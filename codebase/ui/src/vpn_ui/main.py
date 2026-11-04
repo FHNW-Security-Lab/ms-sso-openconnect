@@ -24,6 +24,7 @@ from vpn_ui.worker import (
     VPNWorkerThread,
     create_connect_thread,
     create_disconnect_thread,
+    sanitize_failure,
 )
 
 
@@ -62,6 +63,9 @@ class VPNApplication:
         self._retired_threads: list[VPNWorkerThread] = []
         self._quitting = False
         self._number_match_dialog = None
+        self._error_dialog = None
+        self._last_reported_error = None
+        self._last_error_connection = None
         self._current_connection: Optional[str] = None
         self._settings_dialog: Optional[SettingsDialog] = None
         self._disconnecting: bool = False  # Flag to suppress errors during disconnect
@@ -87,6 +91,7 @@ class VPNApplication:
 
         # Connect signals
         self.tray.connect_requested.connect(self._on_connect_requested)
+        self.tray.connect_with_browser_requested.connect(self._on_browser_connect_requested)
         self.tray.disconnect_requested.connect(self._on_disconnect_requested)
         self.tray.settings_requested.connect(self._show_settings)
         self.tray.quit_requested.connect(self._quit)
@@ -152,11 +157,18 @@ class VPNApplication:
         self._settings_dialog.raise_()
         self._settings_dialog.activateWindow()
 
-    def _on_connect_requested(self, connection_name: str) -> None:
+    def _on_browser_connect_requested(self, connection_name: str) -> None:
+        """Start a visible sign-in only after an explicit user action."""
+        self._on_connect_requested(connection_name, visible=True, single_attempt=True)
+
+    def _on_connect_requested(self, connection_name: str, visible: bool = False,
+                              single_attempt: bool = False) -> None:
         """Handle connect request from tray menu.
 
         Args:
             connection_name: Name of the connection to use
+            visible: Show the sign-in browser for this explicit attempt
+            single_attempt: Bypass saved VPN cookies and automatic reconnect
         """
         # Check if already connecting/connected
         if (any(t.isRunning() for t in self._retired_threads)
@@ -169,6 +181,9 @@ class VPNApplication:
             )
             return
 
+        self._last_reported_error = None
+        self._last_error_connection = None
+        self._close_error_dialog()
         if self.tray.get_status() == STATUS_CONNECTED:
             reply = QMessageBox.question(
                 None,
@@ -183,7 +198,7 @@ class VPNApplication:
             try:
                 self._disconnect_sync()
             except RuntimeError as exc:
-                self._on_error(str(exc))
+                self._report_error(str(exc))
                 return
 
         # Clear stale state before a new connect so tray polling cannot revive
@@ -195,14 +210,18 @@ class VPNApplication:
         self.tray.set_status(STATUS_CONNECTING, connection_name)
         self.notifications.connecting(connection_name)
 
+        profile = self.backend.get_connection(connection_name) or {}
+        show_browser = visible or (sys.platform == "darwin" and profile.get("protocol") == "gp")
+
         # Create and start worker thread
         self._worker_thread = create_connect_thread(
             self.backend,
             connection_name,
-            visible=False,  # Could be made configurable
+            visible=show_browser,
             debug=False,
-            no_cache=False,
-            no_dtls=False
+            no_cache=single_attempt,
+            no_dtls=False,
+            single_attempt=single_attempt,
         )
 
         self._worker_thread.connected.connect(self._on_connected)
@@ -222,6 +241,7 @@ class VPNApplication:
         if self._disconnecting:
             return
 
+        self._last_reported_error = None
         self._close_number_match()
         # Set flag to suppress errors during disconnect
         self._disconnecting = True
@@ -265,6 +285,7 @@ class VPNApplication:
         Args:
             message: Progress message
         """
+        message = sanitize_failure(message)
         if not self._disconnecting:
             if message.startswith(("Connection lost", "Authenticating", "Establishing")):
                 self.tray.set_status(STATUS_CONNECTING, self._current_connection)
@@ -302,6 +323,70 @@ class VPNApplication:
                 dialog.close()
             except RuntimeError:
                 pass
+
+    def _close_error_dialog(self) -> None:
+        dialog = getattr(self, "_error_dialog", None)
+        self._error_dialog = None
+        if dialog is not None:
+            try:
+                dialog.close()
+            except RuntimeError:
+                pass
+
+    def _show_error_dialog(self, message: str) -> None:
+        if getattr(self, "_quitting", False) or message != self._last_reported_error:
+            return
+        dialog = getattr(self, "_error_dialog", None)
+        if dialog is None:
+            dialog = QMessageBox()
+            dialog.setWindowTitle("VPN connection error")
+            dialog.setWindowModality(Qt.WindowModality.NonModal)
+            dialog.setModal(False)
+            dialog.setIcon(QMessageBox.Icon.Critical)
+            dialog.setTextFormat(Qt.TextFormat.PlainText)
+            dialog.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+                | Qt.TextInteractionFlag.TextSelectableByKeyboard
+            )
+            dialog.setStandardButtons(QMessageBox.StandardButton.Ok)
+            dialog.setDefaultButton(QMessageBox.StandardButton.Ok)
+            dialog.setEscapeButton(QMessageBox.StandardButton.Ok)
+            dialog.retry_browser_button = dialog.addButton(
+                "Retry with browser", QMessageBox.ButtonRole.ActionRole,
+            )
+            dialog.retry_browser_button.clicked.connect(
+                lambda: self._retry_error_with_browser(dialog)
+            )
+            dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            dialog.finished.connect(lambda _result: self._forget_error_dialog(dialog))
+            self._error_dialog = dialog
+        dialog.setText(message)
+        connection_name = getattr(self, "_last_error_connection", None)
+        dialog.setProperty("connectionName", connection_name)
+        dialog.retry_browser_button.setVisible(bool(connection_name))
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _forget_error_dialog(self, dialog) -> None:
+        if getattr(self, "_error_dialog", None) is dialog:
+            self._error_dialog = None
+
+    def _retry_error_with_browser(self, dialog) -> None:
+        connection_name = dialog.property("connectionName")
+        if isinstance(connection_name, str) and connection_name:
+            self._on_browser_connect_requested(connection_name)
+
+    def _report_error(self, message: str, connection_name: Optional[str] = None) -> None:
+        """Keep one terminal failure visible independently of notifications."""
+        message = sanitize_failure(message)
+        if message == getattr(self, "_last_reported_error", None):
+            return
+        self._last_reported_error = message
+        self._last_error_connection = connection_name
+        self.notifications.error(message)
+        # Defer window creation until the worker's signal handlers finish.
+        QTimer.singleShot(0, lambda: self._show_error_dialog(message))
 
     def _on_connected(self, name: str) -> None:
         self._close_number_match()
@@ -341,7 +426,7 @@ class VPNApplication:
             # identity and Disconnect action available instead of hiding it.
             self.tray.set_status(STATUS_CONNECTED, self._current_connection)
             if not self._disconnecting:
-                self.notifications.error(message)
+                self._report_error(message, connection_name=self._current_connection)
             return
         if success:
             self.tray.set_status(STATUS_CONNECTED, self._current_connection)
@@ -352,7 +437,7 @@ class VPNApplication:
             self.tray.set_status(STATUS_DISCONNECTED)
             # Only show error if not intentionally disconnecting
             if not self._disconnecting and message not in {"Cancelled", "Disconnected"}:
-                self.notifications.error(message)
+                self._report_error(message, connection_name=self._current_connection)
             self._current_connection = None
             self.backend.clear_active_connection()
 
@@ -376,7 +461,7 @@ class VPNApplication:
                 self.tray.set_status(STATUS_CONNECTED, self._current_connection)
             else:
                 self.tray.set_status(STATUS_DISCONNECTED)
-            self.notifications.error(message)
+            self._report_error(message)
             self.tray.start_status_polling()
             return
         self.tray.set_status(STATUS_DISCONNECTED)
@@ -392,10 +477,9 @@ class VPNApplication:
         """
         # Suppress errors during intentional disconnect
         if self._disconnecting:
-            print(f"[Suppressed during disconnect] {error}")
             return
-        self.notifications.error(error)
-        print(f"[Error] {error}")
+        self._report_error(error, connection_name=self._current_connection)
+        print(f"[Error] {sanitize_failure(error)}")
 
     def _quit(self) -> None:
         needs_disconnect = self.backend.is_connected() or (
@@ -409,6 +493,7 @@ class VPNApplication:
             if reply != QMessageBox.StandardButton.Yes:
                 return
         self._quitting = True
+        self._close_error_dialog()
         self.tray.stop_status_polling()
         self.tray.hide()
         if needs_disconnect:
