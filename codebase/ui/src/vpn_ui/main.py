@@ -210,14 +210,11 @@ class VPNApplication:
         self.tray.set_status(STATUS_CONNECTING, connection_name)
         self.notifications.connecting(connection_name)
 
-        profile = self.backend.get_connection(connection_name) or {}
-        show_browser = visible or (sys.platform == "darwin" and profile.get("protocol") == "gp")
-
         # Create and start worker thread
         self._worker_thread = create_connect_thread(
             self.backend,
             connection_name,
-            visible=show_browser,
+            visible=visible,
             debug=False,
             no_cache=single_attempt,
             no_dtls=False,

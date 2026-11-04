@@ -11,7 +11,7 @@
 
 python3Packages.buildPythonApplication rec {
   pname = "ms-sso-openconnect-ui";
-  version = "2.1.6";
+  version = "2.1.7";
   pyproject = true;
 
   src = ../codebase/ui;

@@ -8,7 +8,7 @@ REPO_ROOT="$FRONTEND_DIR/../.."
 CODEBASE_UI_DIR="$REPO_ROOT/codebase/ui"
 CORE_DIR="$REPO_ROOT/codebase/core"
 DAEMON_SRC_DIR="$REPO_ROOT/frontends/osx/daemon"
-VERSION="${1:-2.1.6}"
+VERSION="${1:-2.1.7}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Usage: $0 [version]"

@@ -2,7 +2,7 @@
 
 python3Packages.buildPythonPackage rec {
   pname = "ms-sso-openconnect-core";
-  version = "2.1.6";
+  version = "2.1.7";
   format = "other";
 
   src = lib.cleanSource ../.;

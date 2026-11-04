@@ -9,7 +9,7 @@ from PyQt6.QtGui import QIcon
 # Application info
 APP_NAME = "MS SSO OpenConnect"
 APP_ID = "com.github.ms-sso-openconnect-ui"
-VERSION = "2.1.6"
+VERSION = "2.1.7"
 
 # Paths - handle PyInstaller bundle vs development
 if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):

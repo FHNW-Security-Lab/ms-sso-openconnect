@@ -126,8 +126,8 @@ class AuthFailureTests(unittest.TestCase):
         self.backend.connect_vpn.assert_called_once()
         self.assertEqual(self.errors, [])
 
-    def test_normal_visible_globalprotect_keeps_reconnect_after_stable_session(self):
-        self.worker.visible = True
+    def test_normal_headless_globalprotect_keeps_reconnect_after_stable_session(self):
+        self.worker.visible = False
         self.backend.do_saml_auth.return_value = {"prelogin-cookie": "fixture-cookie"}
         self.backend.connect_vpn.side_effect = [True, False, False]
         now = [0]
@@ -140,7 +140,7 @@ class AuthFailureTests(unittest.TestCase):
             self.worker.run()
         self.assertEqual(self.backend.do_saml_auth.call_count, 3)
         self.assertEqual(self.backend.connect_vpn.call_count, 3)
-        self.assertFalse(self.backend.do_saml_auth.call_args.kwargs["headless"])
+        self.assertTrue(self.backend.do_saml_auth.call_args.kwargs["headless"])
         self.assertEqual(self.errors, [])
 
 
@@ -287,8 +287,8 @@ class ErrorDialogTests(unittest.TestCase):
         self.assertFalse(create.call_args.kwargs["no_cache"])
         self.assertFalse(create.call_args.kwargs["single_attempt"])
 
-    def test_normal_mac_globalprotect_opens_browser_without_disabling_reconnect_or_cache(self):
-        for platform, protocol, visible in (("darwin", "gp", True), ("darwin", "anyconnect", False),
+    def test_normal_connect_stays_headless_without_disabling_reconnect_or_cache(self):
+        for platform, protocol, visible in (("darwin", "gp", False), ("darwin", "anyconnect", False),
                                             ("linux", "gp", False), ("linux", "anyconnect", False)):
             with self.subTest(platform=platform, protocol=protocol):
                 self.app._worker_thread = None
