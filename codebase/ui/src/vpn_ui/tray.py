@@ -20,6 +20,7 @@ class VPNTrayIcon(QObject):
 
     # Signals
     connect_requested = pyqtSignal(str)  # connection name
+    connect_with_browser_requested = pyqtSignal(str)
     disconnect_requested = pyqtSignal(bool)  # force
     settings_requested = pyqtSignal()
     quit_requested = pyqtSignal()
@@ -77,6 +78,8 @@ class VPNTrayIcon(QObject):
         # Connections submenu (populated dynamically)
         self._connections_menu = self.menu.addMenu("Connect")
         self._connections_menu.setEnabled(False)
+        self._browser_connections_menu = self.menu.addMenu("Connect with browser")
+        self._browser_connections_menu.setEnabled(False)
 
         # Disconnect action
         self._disconnect_action = self.menu.addAction("Disconnect")
@@ -124,12 +127,16 @@ class VPNTrayIcon(QObject):
         """
         self._connections = connections
         self._connections_menu.clear()
+        self._browser_connections_menu.clear()
 
         if not connections:
             self._connections_menu.setEnabled(False)
+            self._browser_connections_menu.setEnabled(False)
             return
 
-        self._connections_menu.setEnabled(True)
+        available = self._current_status == STATUS_DISCONNECTED
+        self._connections_menu.setEnabled(available)
+        self._browser_connections_menu.setEnabled(available)
 
         for name, details in connections.items():
             protocol = details.get("protocol", "anyconnect")
@@ -138,6 +145,10 @@ class VPNTrayIcon(QObject):
             # Use default argument to capture name correctly in lambda
             action.triggered.connect(
                 lambda checked, n=name: self.connect_requested.emit(n)
+            )
+            browser_action = self._browser_connections_menu.addAction(f"{name} ({protocol_name})")
+            browser_action.triggered.connect(
+                lambda checked, n=name: self.connect_with_browser_requested.emit(n)
             )
 
     def set_status(
@@ -159,16 +170,19 @@ class VPNTrayIcon(QObject):
             self._status_action.setText(f"Connected: {connection_name}")
             self.set_disconnect_enabled(True)
             self._connections_menu.setEnabled(False)
+            self._browser_connections_menu.setEnabled(False)
             self.tray.setToolTip(f"{APP_NAME} - Connected to {connection_name}")
         elif status == STATUS_CONNECTING:
             self._status_action.setText(f"Connecting: {connection_name}...")
             self.set_disconnect_enabled(True)
             self._connections_menu.setEnabled(False)
+            self._browser_connections_menu.setEnabled(False)
             self.tray.setToolTip(f"{APP_NAME} - Connecting to {connection_name}...")
         else:
             self._status_action.setText("Status: Disconnected")
             self.set_disconnect_enabled(False)
             self._connections_menu.setEnabled(bool(self._connections))
+            self._browser_connections_menu.setEnabled(bool(self._connections))
             self.tray.setToolTip(f"{APP_NAME} - Disconnected")
 
     def get_status(self) -> str:

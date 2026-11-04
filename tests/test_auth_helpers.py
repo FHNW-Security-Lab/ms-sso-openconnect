@@ -400,6 +400,11 @@ class BrowserUiRecoveryTests(unittest.TestCase):
         self.assertTrue(
             _gp_initial_password_observation_required(**common)
         )
+        self.assertTrue(
+            _gp_initial_password_observation_required(
+                **(common | {"recovery_attempts": 1})
+            )
+        )
         self.assertFalse(
             _gp_initial_password_observation_required(
                 **(
@@ -468,7 +473,6 @@ class BrowserUiRecoveryTests(unittest.TestCase):
         for name, override in {
             "fhnw-unchanged": {"protocol": "anyconnect"},
             "discovery-complete": {"discovery_completed": True},
-            "after-recovery": {"recovery_attempts": 1},
             "after-action": {"password_action_attempts": 1},
             "already-dispatched": {"password_dispatched": True},
             "not-observed": {"observation_started": False},
@@ -2115,6 +2119,7 @@ class BrowserUiRecoveryTests(unittest.TestCase):
         )
         safe_payloads = (
             "event=page-performance",
+            json.dumps({"name": "page-performance"}),
             json.dumps(
                 [
                     {"name": "page-performance"},
@@ -2123,8 +2128,13 @@ class BrowserUiRecoveryTests(unittest.TestCase):
             ),
             '{"name":"first"}\n{"name":"second"}\n',
         )
-        for post_data in safe_payloads:
-            with self.subTest(payload_length=len(post_data)):
+        for resource_type, post_data in (
+            (resource_type, payload)
+            for resource_type in ("fetch", "xhr", "ping")
+            for payload in safe_payloads
+            if resource_type != "ping" or payload.startswith(("{", "["))
+        ):
+            with self.subTest(resource_type=resource_type, payload_length=len(post_data)):
                 tracker = _SensitiveDispatchEvidenceTracker()
                 main_frame = object()
                 tracker.request_started(
@@ -2137,6 +2147,7 @@ class BrowserUiRecoveryTests(unittest.TestCase):
                         is_navigation=False,
                         frame=main_frame,
                         post_data=post_data,
+                        resource_type=resource_type,
                     ),
                     main_frame=main_frame,
                     expected_secret="sentinel-secret",
@@ -2149,6 +2160,68 @@ class BrowserUiRecoveryTests(unittest.TestCase):
                 )
                 self.assertEqual(tracker.outbound_request_generation, 1)
                 self.assertEqual(tracker.credential_taint_generation, 0)
+
+    def test_beacon_payload_failures_remain_unsafe_and_tainted(self):
+        payloads = (
+            "event=page-performance",
+            '{"name":"event","value":"sentinel-secret"}',
+            '{"name":"event","value":"sentinel-\\u0073ecret"}',
+            '{"password":"different-secret"}',
+            '{"nested":{"totp":"123456"}}',
+            '{"name":"first"}\nmalformed-json',
+            "x" * 262145,
+            None,
+        )
+        for index, post_data in enumerate(payloads):
+            with self.subTest(case=index):
+                tracker = _SensitiveDispatchEvidenceTracker()
+                main_frame = object()
+                tracker.request_started(
+                    self._dispatch_request(
+                        url="https://browser.events.data.microsoft.com/collect",
+                        method="POST",
+                        resource_type="ping",
+                        frame=main_frame,
+                        post_data=post_data,
+                    ),
+                    main_frame=main_frame,
+                    expected_secret="sentinel-secret",
+                )
+                self.assertEqual(tracker.write_request_generation, 1)
+                self.assertEqual(tracker.unsafe_write_request_generation, 1)
+                self.assertGreater(tracker.credential_taint_generation, 0)
+
+    def test_beacon_allowlist_does_not_accept_other_origins_or_transports(self):
+        common = {
+            "url": "https://browser.events.data.microsoft.com/collect",
+            "method": "POST",
+            "resource_type": "ping",
+            "post_data": '{"name":"performance"}',
+        }
+        excluded = {
+            "unknown-host": {"url": "https://telemetry.example.test/collect"},
+            "lookalike-host": {
+                "url": "https://browser.events.data.microsoft.com.evil.test/collect",
+            },
+            "insecure": {"url": "http://browser.events.data.microsoft.com/collect"},
+            "other-port": {
+                "url": "https://browser.events.data.microsoft.com:8443/collect",
+            },
+            "unknown-resource": {"resource_type": "other"},
+            "navigation": {"is_navigation": True},
+            "other-write-method": {"method": "PUT"},
+        }
+        for name, overrides in excluded.items():
+            with self.subTest(case=name):
+                tracker = _SensitiveDispatchEvidenceTracker()
+                main_frame = object()
+                tracker.request_started(
+                    self._dispatch_request(**(common | overrides), frame=main_frame),
+                    main_frame=main_frame,
+                    expected_secret="sentinel-secret",
+                )
+                self.assertEqual(tracker.write_request_generation, 1)
+                self.assertEqual(tracker.unsafe_write_request_generation, 1)
 
     def test_telemetry_request_carrying_password_still_taints(self):
         tracker = _SensitiveDispatchEvidenceTracker()
@@ -2174,6 +2247,7 @@ class BrowserUiRecoveryTests(unittest.TestCase):
         class OpaqueTelemetryRequest:
             url = "https://browser.events.data.microsoft.com/collect"
             method = "POST"
+            resource_type = "ping"
             frame = None
 
             @staticmethod

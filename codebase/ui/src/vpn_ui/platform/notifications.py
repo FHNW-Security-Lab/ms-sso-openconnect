@@ -45,13 +45,17 @@ class NotificationManager:
             """
             try:
                 sound_cmd = 'sound name "default"' if sound else ""
-                script = f'display notification "{message}" with title "{title}" {sound_cmd}'
-                subprocess.run(
-                    ["osascript", "-e", script],
+                script = (
+                    "on run argv\n"
+                    "display notification (item 2 of argv) with title (item 1 of argv) "
+                    + sound_cmd + "\nend run"
+                )
+                result = subprocess.run(
+                    ["osascript", "-e", script, title, message],
                     capture_output=True,
                     timeout=5
                 )
-                return True
+                return result.returncode == 0
             except Exception:
                 return False
 

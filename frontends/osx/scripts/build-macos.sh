@@ -8,7 +8,7 @@ REPO_ROOT="$FRONTEND_DIR/../.."
 CODEBASE_UI_DIR="$REPO_ROOT/codebase/ui"
 CORE_DIR="$REPO_ROOT/codebase/core"
 DAEMON_SRC_DIR="$REPO_ROOT/frontends/osx/daemon"
-VERSION="${1:-2.1.0}"
+VERSION="${1:-2.1.7}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Usage: $0 [version]"
@@ -40,7 +40,7 @@ echo "=== Building .app Bundle with PyInstaller ==="
 
 # Create/activate virtual environment for building
 VENV_DIR="$BUILD_DIR/build-venv"
-python3 -m venv "$VENV_DIR"
+"${PYTHON_BIN:-python3}" -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
 
 # Install build dependencies
@@ -186,240 +186,40 @@ LAUNCHDAEMON_DIR="$PKG_ROOT/Library/LaunchDaemons"
 
 mkdir -p "$DAEMON_DIR" "$LAUNCHDAEMON_DIR"
 
-# Create the daemon executable (standalone Python script - uses system Python)
-cat > "$DAEMON_DIR/ms-sso-openconnect-daemon" << 'DAEMON_SCRIPT'
-#!/usr/bin/env python3
-"""VPN Daemon - runs as root via LaunchDaemon."""
+# The privileged helper has its own root-owned runtime. Do not depend on
+# launchd finding Homebrew or the developer-tools Python installation.
+source "$VENV_DIR/bin/activate"
+pyinstaller --clean --noconfirm --onedir \
+    --name ms-sso-openconnect-daemon \
+    --paths "$DAEMON_SRC_DIR" \
+    --distpath "$BUILD_DIR/daemon-dist" \
+    --workpath "$BUILD_DIR/daemon-work" \
+    --specpath "$BUILD_DIR" \
+    "$DAEMON_SRC_DIR/vpn_daemon.py"
+mv "$BUILD_DIR/daemon-dist/ms-sso-openconnect-daemon" "$DAEMON_DIR/ms-sso-openconnect"
 
-import asyncio
-import json
-import os
-import signal
-import subprocess
-import sys
-from pathlib import Path
-from typing import Optional
+# OpenConnect invokes this without a shell command string or system Python.
+cat > "$DAEMON_DIR/ms-sso-openconnect/ms-sso-hip-report" << 'HIP_WRAPPER'
+#!/bin/sh
+exec /Library/PrivilegedHelperTools/ms-sso-openconnect/ms-sso-openconnect-daemon --hip-report "$@"
+HIP_WRAPPER
+chmod +x "$DAEMON_DIR/ms-sso-openconnect/ms-sso-hip-report"
 
-DAEMON_VERSION = "1.0.0"
-SOCKET_PATH = "/var/run/ms-sso-openconnect/daemon.sock"
-PID_FILE = "/var/run/ms-sso-openconnect/daemon.pid"
+cat > "$DAEMON_DIR/ms-sso-openconnect/ms-sso-vpnc-script" << 'NETWORK_WRAPPER'
+#!/bin/sh
+exec /Library/PrivilegedHelperTools/ms-sso-openconnect/ms-sso-openconnect-daemon --network-script
+NETWORK_WRAPPER
+chmod +x "$DAEMON_DIR/ms-sso-openconnect/ms-sso-vpnc-script"
 
-# Search paths for openconnect binary
-OPENCONNECT_PATHS = [
-    "/opt/homebrew/bin/openconnect",
-    "/usr/local/bin/openconnect",
-    "/usr/bin/openconnect",
-]
-
-
-def find_openconnect():
-    for path in OPENCONNECT_PATHS:
-        if os.path.exists(path):
-            return path
-    return None
-
-
-class VPNDaemon:
-    def __init__(self):
-        self._openconnect_proc: Optional[subprocess.Popen] = None
-        self._current_connection: Optional[str] = None
-        self._server = None
-        self._running = True
-
-    async def handle_client(self, reader, writer):
-        try:
-            data = await asyncio.wait_for(reader.readline(), timeout=30)
-            if not data:
-                return
-
-            request = json.loads(data.decode().strip())
-            method = request.get("method", "")
-            params = request.get("params", {})
-            req_id = request.get("id", 0)
-
-            if method == "ping":
-                result = {"pong": True, "version": DAEMON_VERSION}
-            elif method == "connect":
-                result = await self._handle_connect(params)
-            elif method == "disconnect":
-                result = await self._handle_disconnect(params)
-            elif method == "status":
-                result = self._handle_status()
-            else:
-                result = {"error": f"Unknown method: {method}"}
-
-            response = {"jsonrpc": "2.0", "result": result, "id": req_id}
-            writer.write(json.dumps(response).encode() + b"\n")
-            await writer.drain()
-        except Exception as e:
-            print(f"[Daemon] Error: {e}", file=sys.stderr)
-        finally:
-            writer.close()
-            await writer.wait_closed()
-
-    async def _handle_connect(self, params):
-        if self._openconnect_proc and self._openconnect_proc.poll() is None:
-            return {"success": False, "message": "Already connected"}
-
-        address = params.get("address")
-        protocol = params.get("protocol", "anyconnect")
-        cookies = params.get("cookies", {})
-        no_dtls = params.get("no_dtls", False)
-        username = params.get("username")
-        cached_usergroup = params.get("cached_usergroup")
-
-        openconnect_bin = find_openconnect()
-        if not openconnect_bin:
-            return {"success": False, "message": "openconnect not found"}
-
-        cmd = [openconnect_bin]
-        cmd.extend([f"--protocol={protocol}"])
-        if username:
-            cmd.extend(["--user", username])
-        if no_dtls:
-            cmd.append("--no-dtls")
-
-        # Handle cookies based on protocol
-        cookie_value = None
-        if protocol == "gp":
-            if "portal-userauthcookie" in cookies:
-                cookie_value = cookies["portal-userauthcookie"]
-                cmd.extend(["--usergroup", "portal:portal-userauthcookie"])
-            elif "portal_userauthcookie" in cookies:
-                cookie_value = cookies["portal_userauthcookie"]
-                cmd.extend(["--usergroup", "portal:portal-userauthcookie"])
-            elif "prelogin-cookie" in cookies:
-                cmd.extend(["--usergroup", f"portal:{cached_usergroup or 'prelogin-cookie'}"])
-                cookie_value = cookies["prelogin-cookie"]
-        else:
-            # AnyConnect - check various cookie names
-            for key in ["webvpn", "SVPNCOOKIE", "session_token"]:
-                if key in cookies:
-                    cookie_value = cookies[key]
-                    break
-            if not cookie_value and cookies:
-                cookie_value = "; ".join([f"{k}={v}" for k, v in cookies.items()])
-
-        cmd.append(address)
-
-        try:
-            if cookie_value and protocol != "gp":
-                self._openconnect_proc = subprocess.Popen(
-                    cmd + ["--cookie-on-stdin"],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                )
-                self._openconnect_proc.stdin.write((cookie_value + "\n").encode())
-                self._openconnect_proc.stdin.close()
-            elif cookie_value and protocol == "gp":
-                self._openconnect_proc = subprocess.Popen(
-                    cmd + ["--passwd-on-stdin"],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                )
-                self._openconnect_proc.stdin.write((cookie_value + "\n").encode())
-                self._openconnect_proc.stdin.close()
-            else:
-                self._openconnect_proc = subprocess.Popen(
-                    cmd, stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                )
-
-            await asyncio.sleep(2)
-            if self._openconnect_proc.poll() is not None:
-                output = self._openconnect_proc.stdout.read().decode()[:500]
-                return {"success": False, "message": f"Failed: {output}"}
-
-            self._current_connection = params.get("connection_name", address)
-            return {"success": True, "message": "Connected"}
-        except Exception as e:
-            return {"success": False, "message": str(e)}
-
-    async def _handle_disconnect(self, params):
-        if not self._openconnect_proc or self._openconnect_proc.poll() is not None:
-            self._openconnect_proc = None
-            self._current_connection = None
-            return {"success": True, "message": "Not connected"}
-
-        try:
-            # ALWAYS SIGTERM for graceful shutdown on macOS
-            self._openconnect_proc.send_signal(signal.SIGTERM)
-            try:
-                self._openconnect_proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self._openconnect_proc.kill()
-                self._openconnect_proc.wait()
-
-            self._openconnect_proc = None
-            self._current_connection = None
-            return {"success": True, "message": "Disconnected"}
-        except Exception as e:
-            return {"success": False, "message": str(e)}
-
-    def _handle_status(self):
-        if self._openconnect_proc and self._openconnect_proc.poll() is None:
-            return {"connected": True, "connection_name": self._current_connection,
-                    "pid": self._openconnect_proc.pid}
-        return {"connected": False, "connection_name": None, "pid": None}
-
-    def _signal_handler(self, signum, frame):
-        print(f"[Daemon] Signal {signum}, shutting down...", file=sys.stderr)
-        self._running = False
-        if self._openconnect_proc and self._openconnect_proc.poll() is None:
-            self._openconnect_proc.send_signal(signal.SIGTERM)
-            try:
-                self._openconnect_proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._openconnect_proc.kill()
-
-    async def run(self):
-        signal.signal(signal.SIGTERM, self._signal_handler)
-        signal.signal(signal.SIGINT, self._signal_handler)
-
-        socket_dir = Path(SOCKET_PATH).parent
-        socket_dir.mkdir(parents=True, exist_ok=True)
-
-        socket_path = Path(SOCKET_PATH)
-        if socket_path.exists():
-            socket_path.unlink()
-
-        Path(PID_FILE).write_text(str(os.getpid()))
-
-        self._server = await asyncio.start_unix_server(
-            self.handle_client, path=SOCKET_PATH
-        )
-        os.chmod(SOCKET_PATH, 0o666)
-
-        openconnect_bin = find_openconnect()
-        print(f"[Daemon] Started v{DAEMON_VERSION}")
-        print(f"[Daemon] Listening on {SOCKET_PATH}")
-        print(f"[Daemon] openconnect: {openconnect_bin or 'NOT FOUND'}")
-
-        try:
-            while self._running:
-                await asyncio.sleep(1)
-                if self._openconnect_proc and self._openconnect_proc.poll() is not None:
-                    self._openconnect_proc = None
-                    self._current_connection = None
-        finally:
-            self._server.close()
-            await self._server.wait_closed()
-            if socket_path.exists():
-                socket_path.unlink()
-            if Path(PID_FILE).exists():
-                Path(PID_FILE).unlink()
-            print("[Daemon] Shutdown complete")
-
-
-if __name__ == "__main__":
-    if os.geteuid() != 0:
-        print("Error: Must run as root", file=sys.stderr)
-        sys.exit(1)
-    asyncio.run(VPNDaemon().run())
-DAEMON_SCRIPT
-chmod +x "$DAEMON_DIR/ms-sso-openconnect-daemon"
+# Declare the actual minimum supported OS from all bundled native binaries.
+MIN_MACOS=$(python "$SCRIPT_DIR/macos-minimum.py" "$PKG_ROOT")
+/usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion $MIN_MACOS" \
+    "$PKG_ROOT/Applications/MS SSO OpenConnect.app/Contents/Info.plist"
+# Chromium is installed after PyInstaller creates the app. Re-seal the outer
+# bundle now, preserving vendor signatures in its nested browser components.
+codesign --force --sign - "$PKG_ROOT/Applications/MS SSO OpenConnect.app"
+codesign --verify --deep --strict "$PKG_ROOT/Applications/MS SSO OpenConnect.app"
+deactivate
 
 # Copy LaunchDaemon plist
 cp "$DAEMON_SRC_DIR/com.github.ms-sso-openconnect.daemon.plist" "$LAUNCHDAEMON_DIR/"
@@ -430,50 +230,53 @@ cp "$DAEMON_SRC_DIR/com.github.ms-sso-openconnect.daemon.plist" "$LAUNCHDAEMON_D
 echo ""
 echo "=== Creating Install Scripts ==="
 
-# Postinstall script
+# Postinstall runs inside the already-authorized installer. Runtime connections
+# use only the helper socket and never request administrator privileges.
 cat > "$SCRIPTS_DIR/postinstall" << 'POSTINSTALL'
 #!/bin/bash
-# Create socket directory
+set -euo pipefail
+LABEL=com.github.ms-sso-openconnect.daemon
+HELPER=/Library/PrivilegedHelperTools/ms-sso-openconnect/ms-sso-openconnect-daemon
 mkdir -p /var/run/ms-sso-openconnect
 chmod 755 /var/run/ms-sso-openconnect
-
-# Use modern launchctl commands (bootstrap/bootout instead of deprecated load/unload)
-# Try to stop any existing daemon first
-launchctl bootout system/com.github.ms-sso-openconnect.daemon 2>/dev/null || true
-
-# Give it a moment to fully stop
-sleep 1
-
-# Start the daemon using bootstrap (modern macOS 10.10+)
-launchctl bootstrap system /Library/LaunchDaemons/com.github.ms-sso-openconnect.daemon.plist 2>/dev/null || \
-    launchctl load /Library/LaunchDaemons/com.github.ms-sso-openconnect.daemon.plist 2>/dev/null || true
-
-# Verify daemon is running
-sleep 2
-if launchctl list com.github.ms-sso-openconnect.daemon &>/dev/null; then
-    echo "MS SSO OpenConnect installed successfully."
-    echo "The VPN daemon is now running."
-else
-    echo "Warning: VPN daemon may not have started. Try rebooting or run:"
-    echo "  sudo launchctl bootstrap system /Library/LaunchDaemons/com.github.ms-sso-openconnect.daemon.plist"
+launchctl bootout "system/$LABEL" 2>/dev/null || true
+if ! launchctl bootstrap system "/Library/LaunchDaemons/$LABEL.plist"; then
+    echo "Unable to start the VPN helper. Re-run this installer to repair it." >&2
+    exit 1
 fi
-exit 0
+for attempt in {1..15}; do
+    if "$HELPER" --check; then
+        echo "MS SSO OpenConnect installed. VPN connections do not require administrator approval."
+        exit 0
+    fi
+    sleep 1
+done
+echo "The VPN helper did not become ready. Re-run this installer to repair it." >&2
+exit 1
 POSTINSTALL
 chmod +x "$SCRIPTS_DIR/postinstall"
 
-# Preinstall script (stop existing daemon)
 cat > "$SCRIPTS_DIR/preinstall" << 'PREINSTALL'
 #!/bin/bash
-# Stop existing daemon if running (using modern bootout, fallback to legacy unload)
-launchctl bootout system/com.github.ms-sso-openconnect.daemon 2>/dev/null || \
-    launchctl unload /Library/LaunchDaemons/com.github.ms-sso-openconnect.daemon.plist 2>/dev/null || true
-
-# Also kill any orphaned daemon process
-pkill -9 -f "ms-sso-openconnect-daemon" 2>/dev/null || true
-
-# Clean up stale socket
-rm -f /var/run/ms-sso-openconnect/daemon.sock 2>/dev/null || true
-exit 0
+set -euo pipefail
+LABEL=com.github.ms-sso-openconnect.daemon
+# launchd stops its owned helper gracefully; do not kill unrelated VPNs.
+launchctl bootout "system/$LABEL" 2>/dev/null || true
+# bootout can return before shutdown finishes. Allow the plist's 30-second
+# ExitTimeOut plus a small margin before replacing the helper or its socket.
+for attempt in {0..35}; do
+    if ! launchctl print "system/$LABEL" >/dev/null 2>&1; then
+        break
+    fi
+    if (( attempt == 35 )); then
+        echo "The previous VPN helper could not be stopped." >&2
+        exit 1
+    fi
+    sleep 1
+done
+rm -f /var/run/ms-sso-openconnect/daemon.sock
+# Remove the legacy script only; new packages install a self-contained directory.
+rm -f /Library/PrivilegedHelperTools/ms-sso-openconnect-daemon
 PREINSTALL
 chmod +x "$SCRIPTS_DIR/preinstall"
 
@@ -499,7 +302,10 @@ cat > "$BUILD_DIR/Distribution.xml" << DISTRIBUTION
     <title>MS SSO OpenConnect</title>
     <welcome file="welcome.txt"/>
     <conclusion file="conclusion.txt"/>
-    <options customize="never" require-scripts="false"/>
+    <options customize="never" require-scripts="false" hostArchitectures="$(uname -m)"/>
+    <volume-check script="true">
+        <allowed-os-versions><os-version min="${MIN_MACOS}"/></allowed-os-versions>
+    </volume-check>
     <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
     <choices-outline>
         <line choice="default"/>
@@ -508,6 +314,11 @@ cat > "$BUILD_DIR/Distribution.xml" << DISTRIBUTION
         <pkg-ref id="com.github.ms-sso-openconnect"/>
     </choice>
     <pkg-ref id="com.github.ms-sso-openconnect" version="${VERSION}">ms-sso-openconnect-component.pkg</pkg-ref>
+    <pkg-ref id="com.github.ms-sso-openconnect">
+        <must-close>
+            <app id="com.github.ms-sso-openconnect-ui"/>
+        </must-close>
+    </pkg-ref>
 </installer-gui-script>
 DISTRIBUTION
 
@@ -526,19 +337,24 @@ cat > "$BUILD_DIR/conclusion.txt" << 'CONCLUSION'
 Installation Complete!
 
 You can now launch MS SSO OpenConnect from your Applications folder.
+OpenConnect must be installed separately (brew install openconnect).
 
 The VPN daemon is running and will start automatically at boot.
 You won't need to enter your password for VPN connections.
 CONCLUSION
 
+# Only the installer text belongs in the resources archive.
+mkdir -p "$BUILD_DIR/installer-resources"
+cp "$BUILD_DIR/welcome.txt" "$BUILD_DIR/conclusion.txt" "$BUILD_DIR/installer-resources/"
+
 # Build final distribution package
 productbuild \
     --distribution "$BUILD_DIR/Distribution.xml" \
     --package-path "$BUILD_DIR" \
-    --resources "$BUILD_DIR" \
-    "$DIST_DIR/MS-SSO-OpenConnect-${VERSION}.pkg"
+    --resources "$BUILD_DIR/installer-resources" \
+    "$DIST_DIR/MS-SSO-OpenConnect-${VERSION}-macos-$(uname -m).pkg"
 
 echo ""
 echo "=== Build Complete ==="
-echo "Package: $DIST_DIR/MS-SSO-OpenConnect-${VERSION}.pkg"
+echo "Package: $DIST_DIR/MS-SSO-OpenConnect-${VERSION}-macos-$(uname -m).pkg"
 ls -la "$DIST_DIR/"

@@ -8,7 +8,7 @@ REPO_ROOT="$(cd "$FRONTEND_DIR/../.." && pwd)"
 CODEBASE_UI_DIR="$REPO_ROOT/codebase/ui"
 CORE_DIR="$REPO_ROOT/codebase/core"
 PACKAGING_DIR="$FRONTEND_DIR/packaging"
-VERSION="${1:-2.1.0}"
+VERSION="${1:-2.1.7}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     echo "Usage: $0 [version] [appimage|deb|all]"
